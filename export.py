@@ -1,7 +1,4 @@
 import argparse
-import pyspark
-import pyspark.sql.functions as f
-
 
 def export_to_gcs(args):
     """
