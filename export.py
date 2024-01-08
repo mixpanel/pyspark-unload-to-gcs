@@ -5,6 +5,7 @@ def export_to_gcs(args):
     This function takes in GCS credentials and unloads the results of a
     Query to GCS using spark.
     """
+    spark.conf.set("spark.databricks.delta.changeDataFeed.timestampOutOfRange.enabled", "true")
     spark.conf.set("google.cloud.auth.service.account.enable", "true")
     spark.conf.set("fs.gs.project.id", args.gcp_project)
     spark.conf.set("fs.gs.auth.service.account.email", args.service_account_email)
