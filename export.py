@@ -14,8 +14,10 @@ def export_to_gcs(args):
     spark.conf.set("fs.gs.auth.service.account.private.key.id", args.service_account_key_id)
 
     df = spark.sql(args.sql)
-    if len(args.computed_hash_column) > 0:
-        filtered_cols = [c for c in df.columns if c not in args.computed_hash_ignore_columns]
+    # Split the computed_hash_ignore_columns string into a list of column names
+    ignore_columns = args.computed_hash_ignore_columns.split()
+    if len(ignore_columns) > 0:
+        filtered_cols = [c for c in df.columns if c not in ignore_columns]
         filtered_cols.sort()
         needed_cols = F.concat_ws(",", *filtered_cols)
         df = df.withColumn(args.computed_hash_column, needed_cols)
