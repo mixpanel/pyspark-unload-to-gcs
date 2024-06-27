@@ -14,7 +14,10 @@ def export_to_gcs(args):
     spark.conf.set("fs.gs.auth.service.account.private.key.id", args.service_account_key_id)
 
     df = spark.sql(args.sql)
-    if len(args.computed_hash_ignore_columns) > 0:
+    # Split the computed_hash_ignore_columns string into a list of column names
+    ignore_columns = args.computed_hash_ignore_columns.split()
+    if len(ignore_columns) > 0:
+        filtered_cols = [c for c in df.columns if c not in ignore_columns]
         filtered_cols = [c for c in df.columns if c not in args.computed_hash_ignore_columns]
         filtered_cols.sort()
         needed_cols = F.concat_ws(",", *filtered_cols)
@@ -36,8 +39,7 @@ if __name__ == '__main__':
     parser.add_argument('service_account_key_id', help='key with which to authorize the gcs')
     parser.add_argument('service_account_key', help='key with which to authorize the gcs')
     parser.add_argument('computed_hash_column', help="column to emit for computed hash", default='')
-    parser.add_argument('computed_hash_ignore_columns', help="ignore the passed columns from hash computation", nargs='*', default=[])
-    
+    parser.add_argument('computed_hash_ignore_columns', help="ignore the passed columns from hash computation", default='')
 
     args = parser.parse_args()
     export_to_gcs(args)
