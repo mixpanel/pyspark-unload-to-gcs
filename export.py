@@ -20,9 +20,10 @@ def export_to_gcs(args):
         filtered_cols = [c for c in df.columns if c not in ignore_columns]
         filtered_cols = [c for c in df.columns if c not in args.computed_hash_ignore_columns]
         filtered_cols.sort()
-        needed_cols = F.concat_ws("", *filtered_cols)
-        df = df.withColumn(args.computed_hash_column, F.md5(needed_cols))
-    
+        # Create a struct containing all filtered columns
+        struct_col = F.struct(*[F.col(c) for c in filtered_cols])
+        # Convert the struct to a JSON string and compute hash
+        df = df.withColumn(args.computed_hash_column, F.md5(F.to_json(struct_col)))
     if args.export_format == "csv":
         df.coalesce(1).write.format(args.export_format).option("compression", "gzip").option("header", "true").mode("overwrite").save(f"gs://{args.bucket}//{args.prefix}/")
     else:
