@@ -25,10 +25,22 @@ def export_to_gcs(args):
         # Convert the struct to a JSON string and compute hash
         if len(args.computed_hash_column) != 0:
             df = df.withColumn(args.computed_hash_column, F.md5(F.to_json(struct_col)))
+
+    # Build write options with optional maxRecordsPerFile
+    write_options = {"compression": "gzip"}
+    if args.max_records_per_file is not None:
+        write_options["maxRecordsPerFile"] = args.max_records_per_file
+
     if args.export_format == "csv":
-        df.coalesce(1).write.format(args.export_format).option("compression", "gzip").option("header", "true").mode("overwrite").save(f"gs://{args.bucket}//{args.prefix}/")
+        writer = df.coalesce(1).write.format(args.export_format)
+        for key, value in write_options.items():
+            writer = writer.option(key, value)
+        writer.option("header", "true").mode("overwrite").save(f"gs://{args.bucket}//{args.prefix}/")
     else:
-        df.write.format(args.export_format).option("compression", "gzip").mode("overwrite").save(f"gs://{args.bucket}//{args.prefix}/")
+        writer = df.write.format(args.export_format)
+        for key, value in write_options.items():
+            writer = writer.option(key, value)
+        writer.mode("overwrite").save(f"gs://{args.bucket}//{args.prefix}/")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Spark to GCS unload using SparkPython')
@@ -42,6 +54,7 @@ if __name__ == '__main__':
     parser.add_argument('service_account_key', help='key with which to authorize the gcs')
     parser.add_argument('computed_hash_column', help="column to emit for computed hash", default='')
     parser.add_argument('computed_hash_ignore_columns', help="ignore the passed columns from hash computation", default='')
+    parser.add_argument('max_records_per_file', type=int, nargs='?', default=None, help="maximum number of records per output file to limit compressed .gz file size (optional)")
 
     args = parser.parse_args()
     export_to_gcs(args)
