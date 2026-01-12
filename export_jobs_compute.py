@@ -142,9 +142,7 @@ def build_cdc_query(
     return query
 
 
-def build_query(
-    spark: SparkSession, args: argparse.Namespace
-) -> str:
+def build_query(spark: SparkSession, args: argparse.Namespace) -> str:
     """
     Build export query based on sync type.
 
@@ -162,7 +160,12 @@ def build_query(
             spark, args.catalog, args.schema_name, args.table, args.time_cutoff_ms
         )
     elif args.sync_type == "time-based":
+        # Lower bound: events after the cutoff time
         query = f"SELECT * FROM {table_ref} WHERE unix_timestamp({args.updated_time_column})*1000 >= {args.time_cutoff_ms}"
+        # Upper bound: if delay is set, only include events before (now - delay)
+        if args.delay_ms > 0 and args.now_ms > 0:
+            upper_bound_ms = args.now_ms - args.delay_ms
+            query += f" AND unix_timestamp({args.updated_time_column})*1000 <= {upper_bound_ms}"
         return query
     else:  # full or scd-latest
         query = f"SELECT * FROM {table_ref}"
@@ -292,6 +295,16 @@ if __name__ == "__main__":
         type=str,
         help="Column name for time-based filtering (empty string if not applicable)",
     )
+    parser.add_argument(
+        "delay_ms",
+        type=int,
+        help="Delay in milliseconds for adspend (0 if no delay)",
+    )
+    parser.add_argument(
+        "now_ms",
+        type=int,
+        help="Current time in milliseconds from the Go server (for consistent time filtering for adspend)",
+    )
 
     args = parser.parse_args()
 
@@ -305,3 +318,6 @@ if __name__ == "__main__":
 
     # Export to GCS
     export_to_gcs_with_query(spark, query, args)
+
+    # Output result using dbutils.notebook.exit for Databricks visibility
+    dbutils.notebook.exit(query)
