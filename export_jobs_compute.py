@@ -1,10 +1,13 @@
 import argparse
-import json
 from datetime import datetime
-from pyspark.sql import functions as F
+from typing import Optional
+
+from pyspark.sql import SparkSession, functions as F
 
 
-def collect_metadata(spark, catalog, schema, table):
+def collect_metadata(
+    spark: SparkSession, catalog: str, schema: str, table: str
+) -> dict:
     """
     Collect metadata needed for validation.
 
@@ -13,7 +16,7 @@ def collect_metadata(spark, catalog, schema, table):
 
     Note: Timestamps for CDC sync are now computed in build_cdc_query()
     """
-    metadata = {}
+    metadata: dict = {}
 
     # Row count for validation
     try:
@@ -26,7 +29,7 @@ def collect_metadata(spark, catalog, schema, table):
     return metadata
 
 
-def validate_row_count(metadata, limit):
+def validate_row_count(metadata: dict, limit: int) -> None:
     """
     Validate row count against limit. Raises exception if exceeded.
 
@@ -49,7 +52,9 @@ def validate_row_count(metadata, limit):
         raise Exception(f"Row count {row_count} exceeds limit {limit}")
 
 
-def check_procedure_exists(spark, catalog, schema, procedure_name):
+def check_procedure_exists(
+    spark: SparkSession, catalog: str, schema: str, procedure_name: str
+) -> bool:
     """
     Check if a stored procedure exists in the specified catalog.schema.
 
@@ -73,7 +78,9 @@ def check_procedure_exists(spark, catalog, schema, procedure_name):
         return False
 
 
-def build_cdc_query(spark, catalog, schema, table, time_cutoff_ms):
+def build_cdc_query(
+    spark: SparkSession, catalog: str, schema: str, table: str, time_cutoff_ms: int
+) -> tuple[str, int]:
     """
     Build CDC query for Change Data Capture sync.
 
@@ -101,10 +108,14 @@ def build_cdc_query(spark, catalog, schema, table, time_cutoff_ms):
             - query_string: SQL query to execute
             - next_time_cutoff_ms: Timestamp to use for next sync
     """
-    # First sync - snapshot at current time (procedure not used for initial sync)
+    # First sync - snapshot at latest commit (procedure not used for initial sync)
+    # Use DESCRIBE HISTORY to get the exact timestamp of the latest commit,
+    # avoiding race conditions where current_timestamp() > latest commit time
     if time_cutoff_ms == 0:
-        ts_result = spark.sql("SELECT current_timestamp()").first()
-        ts = ts_result[0]
+        history_result = spark.sql(
+            f"SELECT timestamp FROM (DESCRIBE HISTORY {catalog}.{schema}.{table} LIMIT 1)"
+        ).first()
+        ts = history_result[0]
         ts_ms = int(ts.timestamp() * 1000)
         query = f"SELECT 'INSERT' as _mp_change_type, * FROM {catalog}.{schema}.{table} TIMESTAMP AS OF '{ts.isoformat()}'"
         return query, ts_ms
@@ -136,7 +147,9 @@ def build_cdc_query(spark, catalog, schema, table, time_cutoff_ms):
     return query, now_ms
 
 
-def build_query(spark, args):
+def build_query(
+    spark: SparkSession, args: argparse.Namespace
+) -> tuple[str, Optional[int]]:
     """
     Build export query based on sync type.
 
@@ -149,22 +162,25 @@ def build_query(spark, args):
             - query_string: SQL query to execute
             - next_cutoff_ms_or_none: Next time cutoff for CDC syncs (None for other sync types)
     """
+    table_ref = f"{args.catalog}.{args.schema_name}.{args.table}"
+
     if args.sync_type == "cdc":
         return build_cdc_query(
             spark, args.catalog, args.schema_name, args.table, args.time_cutoff_ms
         )
     elif args.sync_type == "time-based":
-        query = f"SELECT * FROM {args.catalog}.{args.schema_name}.{args.table} WHERE unix_timestamp({args.updated_time_column})*1000 >= {args.time_cutoff_ms}"
+        query = f"SELECT * FROM {table_ref} WHERE unix_timestamp({args.updated_time_column})*1000 >= {args.time_cutoff_ms}"
         return query, None
     else:  # full or scd-latest
-        query = f"SELECT * FROM {args.catalog}.{args.schema_name}.{args.table}"
+        query = f"SELECT * FROM {table_ref}"
         return query, None
 
 
-def export_to_gcs_with_query(spark, query, args):
+def export_to_gcs_with_query(
+    spark: SparkSession, query: str, args: argparse.Namespace
+) -> None:
     """
-    This function takes in GCS credentials and unloads the results of a
-    Query to GCS using spark.
+    Export query results to GCS using Spark.
 
     Args:
         spark: SparkSession
@@ -289,50 +305,13 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Build result structure
-    result = {
-        "success": False,
-        "metadata": {},
-        "export_info": {},
-        "error": None,
-    }
+    # Collect and validate metadata if requested
+    if args.collect_metadata:
+        metadata = collect_metadata(spark, args.catalog, args.schema_name, args.table)
+        validate_row_count(metadata, args.validate_row_count)
 
-    try:
-        # Step 1: Collect metadata if requested (for validation)
-        if args.collect_metadata and args.catalog and args.schema_name and args.table:
-            result["metadata"] = collect_metadata(
-                spark, args.catalog, args.schema_name, args.table
-            )
+    # Build query (for CDC, this also computes next cutoff timestamp)
+    query, _ = build_query(spark, args)
 
-            # Step 2: Validate row count
-            validate_row_count(result["metadata"], args.validate_row_count)
-
-        # Step 3: Build query (for CDC, this also computes next cutoff timestamp)
-        query, next_cutoff_ms = build_query(spark, args)
-
-        # Step 4: Export
-        export_to_gcs_with_query(spark, query, args)
-
-        # Step 5: Return next cutoff for CDC syncs
-        if next_cutoff_ms:
-            result["export_info"] = {
-                "status": "completed",
-                "next_time_cutoff_ms": next_cutoff_ms,
-            }
-        else:
-            result["export_info"] = {"status": "completed"}
-
-        result["success"] = True
-
-    except Exception as e:
-        result["error"] = str(e)
-        result["success"] = False
-        raise  # Re-raise to ensure job fails
-
-    finally:
-        # Return result via notebook exit (only if dbutils is available)
-        try:
-            dbutils.notebook.exit(json.dumps(result))
-        except NameError:
-            # dbutils not available (local testing)
-            print(json.dumps(result, indent=2))
+    # Export to GCS
+    export_to_gcs_with_query(spark, query, args)
