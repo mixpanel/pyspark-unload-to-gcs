@@ -151,13 +151,13 @@ def build_query(spark, args):
     """
     if args.sync_type == "cdc":
         return build_cdc_query(
-            spark, args.catalog, args.schema, args.table, args.time_cutoff_ms
+            spark, args.catalog, args.schema_name, args.table, args.time_cutoff_ms
         )
     elif args.sync_type == "time-based":
-        query = f"SELECT * FROM {args.catalog}.{args.schema}.{args.table} WHERE unix_timestamp({args.updated_time_column})*1000 >= {args.time_cutoff_ms}"
+        query = f"SELECT * FROM {args.catalog}.{args.schema_name}.{args.table} WHERE unix_timestamp({args.updated_time_column})*1000 >= {args.time_cutoff_ms}"
         return query, None
     else:  # full or scd-latest
-        query = f"SELECT * FROM {args.catalog}.{args.schema}.{args.table}"
+        query = f"SELECT * FROM {args.catalog}.{args.schema_name}.{args.table}"
         return query, None
 
 
@@ -255,20 +255,14 @@ if __name__ == "__main__":
         help="maximum number of records per output file to limit compressed .gz file size (optional)",
     )
     parser.add_argument(
-        "sync-type",
+        "sync_type",
         type=str,
         choices=["time-based", "full", "scd-latest", "cdc"],
         help="Type of sync (time-based, full, scd-latest, cdc)",
     )
-    parser.add_argument(
-        "catalog", type=str, help="Databricks catalog name"
-    )
-    parser.add_argument(
-        "schema", type=str, help="Databricks schema name"
-    )
-    parser.add_argument(
-        "table", type=str, help="Databricks table name"
-    )
+    parser.add_argument("catalog", type=str, help="Databricks catalog name")
+    parser.add_argument("schema_name", type=str, help="Databricks schema name")
+    parser.add_argument("table", type=str, help="Databricks table name")
     # Optional args
     parser.add_argument(
         "--collect-metadata",
@@ -305,9 +299,9 @@ if __name__ == "__main__":
 
     try:
         # Step 1: Collect metadata if requested (for validation)
-        if args.collect_metadata and args.catalog and args.schema and args.table:
+        if args.collect_metadata and args.catalog and args.schema_name and args.table:
             result["metadata"] = collect_metadata(
-                spark, args.catalog, args.schema, args.table
+                spark, args.catalog, args.schema_name, args.table
             )
 
             # Step 2: Validate row count
