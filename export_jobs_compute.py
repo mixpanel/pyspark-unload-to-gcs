@@ -279,34 +279,31 @@ if __name__ == "__main__":
     parser.add_argument("catalog", type=str, help="Databricks catalog name")
     parser.add_argument("schema_name", type=str, help="Databricks schema name")
     parser.add_argument("table", type=str, help="Databricks table name")
-    # Optional args
     parser.add_argument(
-        "--collect-metadata",
-        action="store_true",
-        help="Collect metadata (row count) before export",
+        "collect_metadata",
+        type=str,
+        help="Collect metadata (row count) before export ('true' or 'false')",
     )
     parser.add_argument(
-        "--validate-row-count",
+        "validate_row_count",
         type=int,
-        default=0,
         help="Fail if row count exceeds this limit (0=no limit)",
     )
     parser.add_argument(
-        "--time-cutoff-ms",
+        "time_cutoff_ms",
         type=int,
-        default=0,
         help="Time cutoff in milliseconds for incremental sync (0 for first sync)",
     )
     parser.add_argument(
-        "--updated-time-column",
+        "updated_time_column",
         type=str,
-        help="Column name for time-based filtering",
+        help="Column name for time-based filtering (empty string if not applicable)",
     )
 
     args = parser.parse_args()
 
     # Collect and validate metadata if requested
-    if args.collect_metadata:
+    if args.collect_metadata.lower() == "true":
         metadata = collect_metadata(spark, args.catalog, args.schema_name, args.table)
         validate_row_count(metadata, args.validate_row_count)
 
