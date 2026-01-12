@@ -1,6 +1,5 @@
 import argparse
 from datetime import datetime
-from typing import Optional
 
 from pyspark.sql import SparkSession, functions as F
 
@@ -80,7 +79,7 @@ def check_procedure_exists(
 
 def build_cdc_query(
     spark: SparkSession, catalog: str, schema: str, table: str, time_cutoff_ms: int
-) -> tuple[str, int]:
+) -> str:
     """
     Build CDC query for Change Data Capture sync.
 
@@ -104,9 +103,7 @@ def build_cdc_query(
         time_cutoff_ms: Timestamp in milliseconds from last sync (0 for first sync)
 
     Returns:
-        tuple: (query_string, next_time_cutoff_ms)
-            - query_string: SQL query to execute
-            - next_time_cutoff_ms: Timestamp to use for next sync
+        query_string: SQL query to execute
     """
     # First sync - snapshot at latest commit (procedure not used for initial sync)
     # Use DESCRIBE HISTORY to get the exact timestamp of the latest commit,
@@ -116,23 +113,21 @@ def build_cdc_query(
             f"SELECT timestamp FROM (DESCRIBE HISTORY {catalog}.{schema}.{table} LIMIT 1)"
         ).first()
         ts = history_result[0]
-        ts_ms = int(ts.timestamp() * 1000)
         query = f"SELECT 'INSERT' as _mp_change_type, * FROM {catalog}.{schema}.{table} TIMESTAMP AS OF '{ts.isoformat()}'"
-        return query, ts_ms
+        return query
 
     # Subsequent sync - check for stored procedure first
     # Add 1ms to exclude entries that were already processed (Databricks timestamps are at millisecond precision)
     cutoff_dt = datetime.fromtimestamp((time_cutoff_ms + 1) / 1000.0)
     now_result = spark.sql("SELECT current_timestamp()").first()
     now = now_result[0]
-    now_ms = int(now.timestamp() * 1000)
 
     # Check if a CDC procedure exists for this table
     procedure_name = f"get_{table}_cdc"
     if check_procedure_exists(spark, catalog, schema, procedure_name):
         # Use stored procedure - it handles transformations and returns _mp_change_type
         query = f"CALL {catalog}.{schema}.{procedure_name}('{cutoff_dt.isoformat()}', '{now.isoformat()}')"
-        return query, now_ms
+        return query
 
     # Fall back to default table_changes query
     query = f"""
@@ -144,12 +139,12 @@ def build_cdc_query(
     END as _mp_change_type, *
     FROM table_changes('{catalog}.{schema}.{table}', '{cutoff_dt.isoformat()}', '{now.isoformat()}')
     """
-    return query, now_ms
+    return query
 
 
 def build_query(
     spark: SparkSession, args: argparse.Namespace
-) -> tuple[str, Optional[int]]:
+) -> str:
     """
     Build export query based on sync type.
 
@@ -158,9 +153,7 @@ def build_query(
         args: Parsed command-line arguments
 
     Returns:
-        tuple: (query_string, next_cutoff_ms_or_none)
-            - query_string: SQL query to execute
-            - next_cutoff_ms_or_none: Next time cutoff for CDC syncs (None for other sync types)
+        query_string: SQL query to execute
     """
     table_ref = f"{args.catalog}.{args.schema_name}.{args.table}"
 
@@ -170,10 +163,10 @@ def build_query(
         )
     elif args.sync_type == "time-based":
         query = f"SELECT * FROM {table_ref} WHERE unix_timestamp({args.updated_time_column})*1000 >= {args.time_cutoff_ms}"
-        return query, None
+        return query
     else:  # full or scd-latest
         query = f"SELECT * FROM {table_ref}"
-        return query, None
+        return query
 
 
 def export_to_gcs_with_query(
@@ -307,8 +300,8 @@ if __name__ == "__main__":
         metadata = collect_metadata(spark, args.catalog, args.schema_name, args.table)
         validate_row_count(metadata, args.validate_row_count)
 
-    # Build query (for CDC, this also computes next cutoff timestamp)
-    query, _ = build_query(spark, args)
+    # Build query
+    query = build_query(spark, args)
 
     # Export to GCS
     export_to_gcs_with_query(spark, query, args)
