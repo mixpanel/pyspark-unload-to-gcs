@@ -1,20 +1,15 @@
 import argparse
+import json
 from datetime import datetime
 
 from pyspark.sql import SparkSession, functions as F
+
+FIRST_SYNC_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE = "FIRST_SYNC"
 
 
 def collect_metadata(
     spark: SparkSession, catalog: str, schema: str, table: str
 ) -> dict:
-    """
-    Collect metadata needed for validation.
-
-    Returns a dict with:
-    - row_count: COUNT(*) for validation
-
-    Note: Timestamps for CDC sync are now computed in build_cdc_query()
-    """
     metadata: dict = {}
 
     # Row count for validation
@@ -29,16 +24,6 @@ def collect_metadata(
 
 
 def validate_row_count(metadata: dict, limit: int) -> None:
-    """
-    Validate row count against limit. Raises exception if exceeded.
-
-    Args:
-        metadata: metadata dict from collect_metadata()
-        limit: row count limit (0 = no limit)
-
-    Raises:
-        Exception: if row count exceeds limit or is unavailable
-    """
     if limit <= 0:
         return  # No validation needed
 
@@ -54,18 +39,6 @@ def validate_row_count(metadata: dict, limit: int) -> None:
 def check_procedure_exists(
     spark: SparkSession, catalog: str, schema: str, procedure_name: str
 ) -> bool:
-    """
-    Check if a stored procedure exists in the specified catalog.schema.
-
-    Args:
-        spark: SparkSession
-        catalog: Databricks catalog name
-        schema: Databricks schema name
-        procedure_name: Name of the procedure to check (e.g., 'get_mytable_cdc')
-
-    Returns:
-        bool: True if procedure exists, False otherwise
-    """
     try:
         # DESCRIBE PROCEDURE returns rows if the procedure exists
         result = spark.sql(
@@ -77,82 +50,76 @@ def check_procedure_exists(
         return False
 
 
-def build_cdc_query(
-    spark: SparkSession, catalog: str, schema: str, table: str, time_cutoff_ms: int
+def _get_cdc_procedure_query(
+    spark: SparkSession,
+    catalog: str,
+    schema: str,
+    table: str,
+    time_cutoff_ms: int,
 ) -> str:
-    """
-    Build CDC query for Change Data Capture sync.
+    procedure_name = f"get_{table}_cdc"
 
-    If a stored procedure named get_{table}_cdc exists, it will be used instead
-    of the default table_changes query. This allows customers to apply custom
-    transformations on top of CDC data.
-
-    Procedure contract:
-        CREATE PROCEDURE {catalog}.{schema}.get_{table}_cdc(
-            start_timestamp STRING,
-            end_timestamp STRING
-        )
-        RETURNS TABLE
-        -- Must include _mp_change_type column with values 'INSERT' or 'DELETE'
-
-    Args:
-        spark: SparkSession
-        catalog: Databricks catalog name
-        schema: Databricks schema name
-        table: Databricks table name
-        time_cutoff_ms: Timestamp in milliseconds from last sync (0 for first sync)
-
-    Returns:
-        query_string: SQL query to execute
-    """
-    # First sync - snapshot at latest commit (procedure not used for initial sync)
-    # Use DESCRIBE HISTORY to get the exact timestamp of the latest commit,
-    # avoiding race conditions where current_timestamp() > latest commit time
     if time_cutoff_ms == 0:
-        history_result = spark.sql(
-            f"SELECT timestamp FROM (DESCRIBE HISTORY {catalog}.{schema}.{table} LIMIT 1)"
-        ).first()
-        ts = history_result[0]
-        query = f"SELECT 'INSERT' as _mp_change_type, * FROM {catalog}.{schema}.{table} TIMESTAMP AS OF '{ts.isoformat()}'"
-        return query
+        # First sync - use placeholder to signal full snapshot
+        return f"CALL {catalog}.{schema}.{procedure_name}('{FIRST_SYNC_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE}', '{FIRST_SYNC_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE}')"
 
-    # Subsequent sync - check for stored procedure first
-    # Add 1ms to exclude entries that were already processed (Databricks timestamps are at millisecond precision)
+    # Subsequent sync - use actual timestamps
+    # Add 1ms to exclude entries already processed (Databricks timestamps are at millisecond precision)
     cutoff_dt = datetime.fromtimestamp((time_cutoff_ms + 1) / 1000.0)
     now_result = spark.sql("SELECT current_timestamp()").first()
     now = now_result[0]
 
-    # Check if a CDC procedure exists for this table
-    procedure_name = f"get_{table}_cdc"
-    if check_procedure_exists(spark, catalog, schema, procedure_name):
-        # Use stored procedure - it handles transformations and returns _mp_change_type
-        query = f"CALL {catalog}.{schema}.{procedure_name}('{cutoff_dt.isoformat()}', '{now.isoformat()}')"
-        return query
+    return f"CALL {catalog}.{schema}.{procedure_name}('{cutoff_dt.isoformat()}', '{now.isoformat()}')"
 
-    # Fall back to default table_changes query
-    query = f"""
+
+def _get_cdc_table_query(
+    spark: SparkSession,
+    catalog: str,
+    schema: str,
+    table: str,
+    time_cutoff_ms: int,
+) -> str:
+    table_ref = f"{catalog}.{schema}.{table}"
+
+    if time_cutoff_ms == 0:
+        # First sync - table_changes has 30-day retention, so query the table directly
+        # Use DESCRIBE HISTORY to get exact timestamp of latest commit,
+        # avoiding race conditions where current_timestamp() > latest commit time
+        history_result = spark.sql(
+            f"SELECT timestamp FROM (DESCRIBE HISTORY {table_ref} LIMIT 1)"
+        ).first()
+        ts = history_result[0]
+        return f"SELECT 'INSERT' as _mp_change_type, * FROM {table_ref} TIMESTAMP AS OF '{ts.isoformat()}'"
+
+    # Subsequent sync - use table_changes for incremental data
+    # Add 1ms to exclude entries already processed (Databricks timestamps are at millisecond precision)
+    cutoff_dt = datetime.fromtimestamp((time_cutoff_ms + 1) / 1000.0)
+    now_result = spark.sql("SELECT current_timestamp()").first()
+    now = now_result[0]
+
+    return f"""
     SELECT CASE
         WHEN _change_type = 'update_postimage' THEN 'INSERT'
         WHEN _change_type = 'update_preimage' THEN 'DELETE'
         WHEN _change_type = 'insert' THEN 'INSERT'
         ELSE 'DELETE'
     END as _mp_change_type, *
-    FROM table_changes('{catalog}.{schema}.{table}', '{cutoff_dt.isoformat()}', '{now.isoformat()}')
+    FROM table_changes('{table_ref}', '{cutoff_dt.isoformat()}', '{now.isoformat()}')
     """
-    return query
+
+
+def build_cdc_query(
+    spark: SparkSession, catalog: str, schema: str, table: str, time_cutoff_ms: int
+) -> str:
+    procedure_name = f"get_{table}_cdc"
+
+    if check_procedure_exists(spark, catalog, schema, procedure_name):
+        return _get_cdc_procedure_query(spark, catalog, schema, table, time_cutoff_ms)
+
+    return _get_cdc_table_query(spark, catalog, schema, table, time_cutoff_ms)
 
 
 def build_query(spark: SparkSession, args: argparse.Namespace) -> str:
-    """
-    Build export query based on sync type.
-
-    Args:
-        spark: SparkSession
-        args: Parsed command-line arguments
-
-    Returns:
-        query_string: SQL query to execute
-    """
     table_ref = f"{args.catalog}.{args.schema_name}.{args.table}"
 
     if args.sync_type == "cdc":
@@ -175,14 +142,6 @@ def build_query(spark: SparkSession, args: argparse.Namespace) -> str:
 def export_to_gcs_with_query(
     spark: SparkSession, query: str, args: argparse.Namespace
 ) -> None:
-    """
-    Export query results to GCS using Spark.
-
-    Args:
-        spark: SparkSession
-        query: SQL query string to execute
-        args: Parsed command-line arguments
-    """
     spark.conf.set(
         "spark.databricks.delta.changeDataFeed.timestampOutOfRange.enabled", "true"
     )
@@ -394,3 +353,4 @@ if __name__ == "__main__":
             validate_row_count(metadata, args.validate_row_count)
         query = build_query(spark, args)
         export_to_gcs_with_query(spark, query, args)
+        dbutils.notebook.exit(json.dumps({"query": query}))
