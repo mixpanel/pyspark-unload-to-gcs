@@ -384,7 +384,7 @@ if __name__ == "__main__":
 
     # V1 path (use SQL passed in as argument)
     if args._legacy_sql:
-        export_to_gcs_with_query(spark, args.sql, args)
+        export_to_gcs_with_query(spark, args._legacy_sql, args)
     else:
         # V2 path (construct SQL query in Python code)
         if args.collect_metadata.lower() == "true":
