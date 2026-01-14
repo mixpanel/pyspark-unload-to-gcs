@@ -233,44 +233,48 @@ if __name__ == "__main__":
         description="Spark to GCS unload using SparkPython"
     )
     # Will remove these arguments soon
-    parser.add_argument("sql", help="results of sql query to unload", nargs="?")
+    parser.add_argument("_legacy_sql", help="results of sql query to unload", nargs="?")
     parser.add_argument(
-        "export_format",
+        "_legacy_export_format",
         help="format to export the data. Supports json and csv",
         default="json",
         nargs="?",
         choices=["json", "csv"],
     )
     parser.add_argument(
-        "gcp_project", help="project in which gcs resources are", nargs="?"
+        "_legacy_gcp_project", help="project in which gcs resources are", nargs="?"
     )
-    parser.add_argument("bucket", help="gcs bucket to unload", nargs="?")
-    parser.add_argument("prefix", help="gcs path to unload", nargs="?")
+    parser.add_argument("_legacy_bucket", help="gcs bucket to unload", nargs="?")
+    parser.add_argument("_legacy_prefix", help="gcs path to unload", nargs="?")
     parser.add_argument(
-        "service_account_email",
+        "_legacy_service_account_email",
         help="service account which has access to the gcs bucket and path",
         nargs="?",
     )
     parser.add_argument(
-        "service_account_key_id", help="key with which to authorize the gcs", nargs="?"
+        "_legacy_service_account_key_id",
+        help="key with which to authorize the gcs",
+        nargs="?",
     )
     parser.add_argument(
-        "service_account_key", help="key with which to authorize the gcs", nargs="?"
+        "_legacy_service_account_key",
+        help="key with which to authorize the gcs",
+        nargs="?",
     )
     parser.add_argument(
-        "computed_hash_column",
+        "_legacy_computed_hash_column",
         help="column to emit for computed hash",
         default="",
         nargs="?",
     )
     parser.add_argument(
-        "computed_hash_ignore_columns",
+        "_legacy_computed_hash_ignore_columns",
         help="ignore the passed columns from hash computation",
         default="",
         nargs="?",
     )
     parser.add_argument(
-        "max_records_per_file",
+        "_legacy_max_records_per_file",
         type=int,
         nargs="?",
         default=None,
@@ -354,8 +358,32 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Fallback to legacy positional args if named args not provided (V1 compatibility)
+    args.export_format = args.export_format or args._legacy_export_format
+    args.gcp_project = args.gcp_project or args._legacy_gcp_project
+    args.bucket = args.bucket or args._legacy_bucket
+    args.prefix = args.prefix or args._legacy_prefix
+    args.service_account_email = (
+        args.service_account_email or args._legacy_service_account_email
+    )
+    args.service_account_key_id = (
+        args.service_account_key_id or args._legacy_service_account_key_id
+    )
+    args.service_account_key = (
+        args.service_account_key or args._legacy_service_account_key
+    )
+    args.computed_hash_column = (
+        args.computed_hash_column or args._legacy_computed_hash_column
+    )
+    args.computed_hash_ignore_columns = (
+        args.computed_hash_ignore_columns or args._legacy_computed_hash_ignore_columns
+    )
+    args.max_records_per_file = (
+        args.max_records_per_file or args._legacy_max_records_per_file
+    )
+
     # V1 path (use SQL passed in as argument)
-    if args.sql:
+    if args._legacy_sql:
         export_to_gcs_with_query(spark, args.sql, args)
     else:
         # V2 path (construct SQL query in Python code)
