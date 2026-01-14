@@ -233,7 +233,7 @@ if __name__ == "__main__":
         description="Spark to GCS unload using SparkPython"
     )
     # Will remove these arguments soon
-    parser.add_argument("sql", help="results of sql query to unload")
+    parser.add_argument("sql", help="results of sql query to unload", nargs="?")
     parser.add_argument(
         "export_format",
         help="format to export the data. Supports json and csv",
