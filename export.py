@@ -7,30 +7,19 @@ from pyspark.sql import SparkSession, functions as F
 FIRST_SYNC_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE = "FIRST_SYNC"
 
 
-def collect_metadata(
-    spark: SparkSession, catalog: str, schema: str, table: str
-) -> dict:
-    metadata: dict = {}
+def validate_row_count(
+    spark: SparkSession, catalog: str, schema: str, table: str, limit: int
+) -> None:
+    if limit <= 0:
+        return
 
-    # Row count for validation
     try:
         result = spark.sql(f"SELECT count(*) FROM {catalog}.{schema}.{table}").first()
-        if result and result[0] is not None:
-            metadata["row_count"] = int(result[0])
+        if result is None or result[0] is None:
+            raise Exception("Row count unavailable: query returned no result")
+        row_count = int(result[0])
     except Exception as e:
-        metadata["row_count_error"] = str(e)
-
-    return metadata
-
-
-def validate_row_count(metadata: dict, limit: int) -> None:
-    if limit <= 0:
-        return  # No validation needed
-
-    row_count = metadata.get("row_count")
-    if row_count is None:
-        error = metadata.get("row_count_error", "Unknown error")
-        raise Exception(f"Row count unavailable: {error}")
+        raise Exception(f"Row count unavailable: {e}")
 
     if row_count > limit:
         raise Exception(f"Row count {row_count} exceeds limit {limit}")
@@ -50,26 +39,29 @@ def check_procedure_exists(
         return False
 
 
+def _get_cdc_time_range(
+    spark: SparkSession, time_cutoff_ms: int
+) -> tuple[datetime, datetime]:
+    # Add 1ms to exclude entries already processed (Databricks timestamps are at millisecond precision)
+    cutoff_dt = datetime.fromtimestamp((time_cutoff_ms + 1) / 1000.0)
+    now_result = spark.sql("SELECT current_timestamp()").first()
+    now_dt = now_result[0]
+    return cutoff_dt, now_dt
+
+
 def _get_cdc_procedure_query(
     spark: SparkSession,
     catalog: str,
     schema: str,
-    table: str,
+    procedure_name: str,
     time_cutoff_ms: int,
 ) -> str:
-    procedure_name = f"get_{table}_cdc"
-
     if time_cutoff_ms == 0:
         # First sync - use placeholder to signal full snapshot
         return f"CALL {catalog}.{schema}.{procedure_name}('{FIRST_SYNC_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE}', '{FIRST_SYNC_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE}')"
 
-    # Subsequent sync - use actual timestamps
-    # Add 1ms to exclude entries already processed (Databricks timestamps are at millisecond precision)
-    cutoff_dt = datetime.fromtimestamp((time_cutoff_ms + 1) / 1000.0)
-    now_result = spark.sql("SELECT current_timestamp()").first()
-    now = now_result[0]
-
-    return f"CALL {catalog}.{schema}.{procedure_name}('{cutoff_dt.isoformat()}', '{now.isoformat()}')"
+    cutoff_dt, now_dt = _get_cdc_time_range(spark, time_cutoff_ms)
+    return f"CALL {catalog}.{schema}.{procedure_name}('{cutoff_dt.isoformat()}', '{now_dt.isoformat()}')"
 
 
 def _get_cdc_table_query(
@@ -91,12 +83,7 @@ def _get_cdc_table_query(
         ts = history_result[0]
         return f"SELECT 'INSERT' as _mp_change_type, * FROM {table_ref} TIMESTAMP AS OF '{ts.isoformat()}'"
 
-    # Subsequent sync - use table_changes for incremental data
-    # Add 1ms to exclude entries already processed (Databricks timestamps are at millisecond precision)
-    cutoff_dt = datetime.fromtimestamp((time_cutoff_ms + 1) / 1000.0)
-    now_result = spark.sql("SELECT current_timestamp()").first()
-    now = now_result[0]
-
+    cutoff_dt, now_dt = _get_cdc_time_range(spark, time_cutoff_ms)
     return f"""
     SELECT CASE
         WHEN _change_type = 'update_postimage' THEN 'INSERT'
@@ -104,28 +91,27 @@ def _get_cdc_table_query(
         WHEN _change_type = 'insert' THEN 'INSERT'
         ELSE 'DELETE'
     END as _mp_change_type, *
-    FROM table_changes('{table_ref}', '{cutoff_dt.isoformat()}', '{now.isoformat()}')
+    FROM table_changes('{table_ref}', '{cutoff_dt.isoformat()}', '{now_dt.isoformat()}')
     """
-
-
-def build_cdc_query(
-    spark: SparkSession, catalog: str, schema: str, table: str, time_cutoff_ms: int
-) -> str:
-    procedure_name = f"get_{table}_cdc"
-
-    if check_procedure_exists(spark, catalog, schema, procedure_name):
-        return _get_cdc_procedure_query(spark, catalog, schema, table, time_cutoff_ms)
-
-    return _get_cdc_table_query(spark, catalog, schema, table, time_cutoff_ms)
 
 
 def build_query(spark: SparkSession, args: argparse.Namespace) -> str:
     table_ref = f"{args.catalog}.{args.schema_name}.{args.table}"
+    procedure_name = f"get_{args.table}_cdc"
 
     if args.sync_type == "cdc":
-        return build_cdc_query(
-            spark, args.catalog, args.schema_name, args.table, args.time_cutoff_ms
-        )
+        if check_procedure_exists(spark, args.catalog, args.schema, procedure_name):
+            return _get_cdc_procedure_query(
+                spark,
+                args.catalog,
+                args.schema_name,
+                procedure_name,
+                args.time_cutoff_ms,
+            )
+        else:
+            return _get_cdc_table_query(
+                spark, args.catalog, args.schema_name, args.table, args.time_cutoff_ms
+            )
     elif args.sync_type == "time-based":
         # Lower bound: events after the cutoff time
         query = f"SELECT * FROM {table_ref} WHERE unix_timestamp({args.updated_time_column})*1000 >= {args.time_cutoff_ms}"
@@ -285,11 +271,6 @@ if __name__ == "__main__":
     parser.add_argument("--schema_name", type=str, help="Databricks schema name")
     parser.add_argument("--table", type=str, help="Databricks table name")
     parser.add_argument(
-        "--collect_metadata",
-        type=str,
-        help="Collect metadata (row count) before export ('true' or 'false')",
-    )
-    parser.add_argument(
         "--validate_row_count",
         type=int,
         help="Fail if row count exceeds this limit (0=no limit)",
@@ -346,11 +327,9 @@ if __name__ == "__main__":
         export_to_gcs_with_query(spark, args._legacy_sql, args)
     else:
         # V2 path (construct SQL query in Python code)
-        if args.collect_metadata.lower() == "true":
-            metadata = collect_metadata(
-                spark, args.catalog, args.schema_name, args.table
-            )
-            validate_row_count(metadata, args.validate_row_count)
+        validate_row_count(
+            spark, args.catalog, args.schema_name, args.table, args.validate_row_count
+        )
         query = build_query(spark, args)
         export_to_gcs_with_query(spark, query, args)
         dbutils.notebook.exit(json.dumps({"query": query}))
