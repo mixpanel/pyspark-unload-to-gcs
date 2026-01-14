@@ -100,7 +100,7 @@ def build_query(spark: SparkSession, args: argparse.Namespace) -> str:
     procedure_name = f"get_{args.table}_cdc"
 
     if args.sync_type == "cdc":
-        if check_procedure_exists(spark, args.catalog, args.schema, procedure_name):
+        if check_procedure_exists(spark, args.catalog, args.schema_name, procedure_name):
             return _get_cdc_procedure_query(
                 spark,
                 args.catalog,
