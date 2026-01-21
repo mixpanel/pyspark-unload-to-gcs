@@ -8,19 +8,18 @@ from pyspark.sql import SparkSession, functions as F
 FIRST_SYNC_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE = "FIRST_SYNC"
 
 
-def generate_filter(is_full_sync: bool, non_nullable_columns: Optional[str]) -> str:
+def generate_filter(non_nullable_columns: Optional[str]) -> str:
     """
-    Generate a SQL WHERE/AND clause to filter out rows where required columns are NULL or empty.
+    Generate a SQL condition to filter out rows where required columns are NULL or empty.
     """
     if not non_nullable_columns:
         return ""
 
     columns = non_nullable_columns.split(",")
-    prefix = "WHERE " if is_full_sync else "AND "
     conditions = [
         f"{field} IS NOT NULL AND {field} != ''" for field in columns
     ]
-    return prefix + " AND ".join(conditions)
+    return " AND ".join(conditions)
 
 
 def validate_row_count(
@@ -131,31 +130,31 @@ def build_query(spark: SparkSession, args: argparse.Namespace) -> str:
                 spark, args.catalog, args.schema_name, args.table, args.time_cutoff_ms
             )
     if args.sync_type == "time-based":
-        filter_clause = generate_filter(
-            is_full_sync=False, non_nullable_columns=args.non_nullable_columns
-        )
-        query = f"SELECT * FROM {table_ref} WHERE unix_timestamp({args.updated_time_column})*1000 >= {args.time_cutoff_ms} {filter_clause}"
+        filter_condition = generate_filter(args.non_nullable_columns)
+        query = f"SELECT * FROM {table_ref} WHERE unix_timestamp({args.updated_time_column})*1000 >= {args.time_cutoff_ms}"
+        if filter_condition:
+            query += f" AND {filter_condition}"
         if args.delay_ms > 0 and args.now_ms > 0:
             upper_bound_ms = args.now_ms - args.delay_ms
             query += f" AND unix_timestamp({args.updated_time_column})*1000 <= {upper_bound_ms}"
         return query
     elif args.sync_type == "full":
-        filter_clause = generate_filter(
-            is_full_sync=True, non_nullable_columns=args.non_nullable_columns
-        )
-        return f"SELECT * FROM {table_ref} {filter_clause}"
+        filter_condition = generate_filter(args.non_nullable_columns)
+        query = f"SELECT * FROM {table_ref}"
+        if filter_condition:
+            query += f" WHERE {filter_condition}"
+        return query
     elif args.sync_type == "scd-latest":
         if not args.group_id_column or not args.scd_time_column:
             raise ValueError(
                 "scd-latest sync requires --group_id_column and --scd_time_column"
             )
-        filter_clause = generate_filter(
-            is_full_sync=True, non_nullable_columns=args.non_nullable_columns
-        )
+        filter_condition = generate_filter(args.non_nullable_columns)
+        where_clause = f" WHERE {filter_condition}" if filter_condition else ""
         return f"""SELECT *
 FROM (
     SELECT *, ROW_NUMBER() OVER (PARTITION BY {args.group_id_column} ORDER BY {args.scd_time_column} DESC) AS row_num
-    FROM {table_ref} {filter_clause}
+    FROM {table_ref}{where_clause}
 ) RankedRows
 WHERE row_num = 1"""
     else:
