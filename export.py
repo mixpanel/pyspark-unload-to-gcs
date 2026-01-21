@@ -1,10 +1,25 @@
 import argparse
 import json
 from datetime import datetime
+from typing import Optional
 
 from pyspark.sql import SparkSession, functions as F
 
 FIRST_SYNC_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE = "FIRST_SYNC"
+
+
+def generate_filter(non_nullable_columns: Optional[str]) -> str:
+    """
+    Generate a SQL condition to filter out rows where required columns are NULL or empty.
+    """
+    if not non_nullable_columns:
+        return ""
+
+    columns = non_nullable_columns.split(",")
+    conditions = [
+        f"{field} IS NOT NULL AND {field} != ''" for field in columns
+    ]
+    return " AND ".join(conditions)
 
 
 def validate_row_count(
@@ -100,7 +115,9 @@ def build_query(spark: SparkSession, args: argparse.Namespace) -> str:
     procedure_name = f"get_{args.table}_cdc"
 
     if args.sync_type == "cdc":
-        if check_procedure_exists(spark, args.catalog, args.schema_name, procedure_name):
+        if check_procedure_exists(
+            spark, args.catalog, args.schema_name, procedure_name
+        ):
             return _get_cdc_procedure_query(
                 spark,
                 args.catalog,
@@ -112,17 +129,36 @@ def build_query(spark: SparkSession, args: argparse.Namespace) -> str:
             return _get_cdc_table_query(
                 spark, args.catalog, args.schema_name, args.table, args.time_cutoff_ms
             )
-    elif args.sync_type == "time-based":
-        # Lower bound: events after the cutoff time
+    if args.sync_type == "time-based":
+        filter_condition = generate_filter(args.non_nullable_columns)
         query = f"SELECT * FROM {table_ref} WHERE unix_timestamp({args.updated_time_column})*1000 >= {args.time_cutoff_ms}"
-        # Upper bound: if delay is set, only include events before (now - delay)
+        if filter_condition:
+            query += f" AND {filter_condition}"
         if args.delay_ms > 0 and args.now_ms > 0:
             upper_bound_ms = args.now_ms - args.delay_ms
             query += f" AND unix_timestamp({args.updated_time_column})*1000 <= {upper_bound_ms}"
         return query
-    else:  # full or scd-latest
+    elif args.sync_type == "full":
+        filter_condition = generate_filter(args.non_nullable_columns)
         query = f"SELECT * FROM {table_ref}"
+        if filter_condition:
+            query += f" WHERE {filter_condition}"
         return query
+    elif args.sync_type == "scd-latest":
+        if not args.group_id_column or not args.scd_time_column:
+            raise ValueError(
+                "scd-latest sync requires --group_id_column and --scd_time_column"
+            )
+        filter_condition = generate_filter(args.non_nullable_columns)
+        where_clause = f" WHERE {filter_condition}" if filter_condition else ""
+        return f"""SELECT *
+FROM (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY {args.group_id_column} ORDER BY {args.scd_time_column} DESC) AS row_num
+    FROM {table_ref}{where_clause}
+) RankedRows
+WHERE row_num = 1"""
+    else:
+        raise ValueError(f"Unknown sync_type: {args.sync_type}")
 
 
 def export_to_gcs_with_query(
@@ -294,6 +330,21 @@ if __name__ == "__main__":
         "--now_ms",
         type=int,
         help="Current time in milliseconds from the Go server (for consistent time filtering for adspend)",
+    )
+    parser.add_argument(
+        "--non_nullable_columns",
+        type=str,
+        help="Comma-separated list of columns that must not be NULL or empty (for full, scd-latest, time-based sync)",
+    )
+    parser.add_argument(
+        "--group_id_column",
+        type=str,
+        help="Column to partition by for SCD latest sync (required for scd-latest)",
+    )
+    parser.add_argument(
+        "--scd_time_column",
+        type=str,
+        help="Column to order by (descending) for SCD latest sync (required for scd-latest)",
     )
 
     args = parser.parse_args()
