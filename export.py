@@ -88,14 +88,10 @@ def _get_cdc_procedure_query(
 ) -> str:
     if time_cutoff_ms == 0:
         # First sync - use placeholder to signal full snapshot
-        return (
-            f"CALL {catalog}.{schema}.{procedure_name}('{FIRST_SYNC_START_TIME_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE}', '{end_dt.isoformat()}')"
-        )
+        return f"CALL {catalog}.{schema}.{procedure_name}('{FIRST_SYNC_START_TIME_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE}', '{end_dt.isoformat()}')"
 
     cutoff_dt = ms_to_datetime(time_cutoff_ms)
-    return (
-        f"CALL {catalog}.{schema}.{procedure_name}('{cutoff_dt.isoformat()}', '{end_dt.isoformat()}')"
-    )
+    return f"CALL {catalog}.{schema}.{procedure_name}('{cutoff_dt.isoformat()}', '{end_dt.isoformat()}')"
 
 
 def _get_cdc_table_query(
@@ -109,9 +105,7 @@ def _get_cdc_table_query(
 
     if time_cutoff_ms == 0:
         # First sync - table_changes has 30-day retention, so query the table directly
-        return (
-            f"SELECT 'INSERT' as _mp_change_type, * FROM {table_ref} TIMESTAMP AS OF '{end_dt.isoformat()}'"
-        )
+        return f"SELECT 'INSERT' as _mp_change_type, * FROM {table_ref} TIMESTAMP AS OF '{end_dt.isoformat()}'"
 
     cutoff_dt = ms_to_datetime(time_cutoff_ms)
     return f"""
