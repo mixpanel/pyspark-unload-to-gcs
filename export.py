@@ -1,11 +1,21 @@
 import argparse
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from pyspark.sql import SparkSession, functions as F
 
-FIRST_SYNC_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE = "FIRST_SYNC"
+FIRST_SYNC_START_TIME_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE = "FIRST_SYNC"
+
+
+def ms_to_datetime(ms: int) -> datetime:
+    """Convert milliseconds since epoch to a timezone-aware datetime object."""
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+
+
+def datetime_to_ms(dt: datetime) -> int:
+    """Convert a datetime object to milliseconds since epoch."""
+    return int(dt.timestamp() * 1000)
 
 
 def generate_filter(non_nullable_columns: Optional[str]) -> str:
@@ -16,9 +26,7 @@ def generate_filter(non_nullable_columns: Optional[str]) -> str:
         return ""
 
     columns = non_nullable_columns.split(",")
-    conditions = [
-        f"{field} IS NOT NULL AND {field} != ''" for field in columns
-    ]
+    conditions = [f"{field} IS NOT NULL AND {field} != ''" for field in columns]
     return " AND ".join(conditions)
 
 
@@ -54,51 +62,60 @@ def check_procedure_exists(
         return False
 
 
-def _get_cdc_time_range(
-    spark: SparkSession, time_cutoff_ms: int
-) -> tuple[datetime, datetime]:
-    # Add 1ms to exclude entries already processed (Databricks timestamps are at millisecond precision)
-    cutoff_dt = datetime.fromtimestamp((time_cutoff_ms + 1) / 1000.0)
-    now_result = spark.sql("SELECT current_timestamp()").first()
-    now_dt = now_result[0]
-    return cutoff_dt, now_dt
-
-
-def _get_cdc_procedure_query(
-    spark: SparkSession,
-    catalog: str,
-    schema: str,
-    procedure_name: str,
-    time_cutoff_ms: int,
-) -> str:
-    if time_cutoff_ms == 0:
-        # First sync - use placeholder to signal full snapshot
-        return f"CALL {catalog}.{schema}.{procedure_name}('{FIRST_SYNC_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE}', '{FIRST_SYNC_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE}')"
-
-    cutoff_dt, now_dt = _get_cdc_time_range(spark, time_cutoff_ms)
-    return f"CALL {catalog}.{schema}.{procedure_name}('{cutoff_dt.isoformat()}', '{now_dt.isoformat()}')"
-
-
-def _get_cdc_table_query(
+def _get_latest_commit_timestamp(
     spark: SparkSession,
     catalog: str,
     schema: str,
     table: str,
+) -> datetime:
+    history_result = spark.sql(
+        f"SELECT timestamp FROM (DESCRIBE HISTORY {catalog}.{schema}.{table} LIMIT 1)"
+    ).first()
+    last_commit_dt = history_result[0]
+    return last_commit_dt
+
+
+def _get_latest_timestamp(spark: SparkSession) -> datetime:
+    now_result = spark.sql("SELECT current_timestamp()").first()
+    now_dt = now_result[0]
+    return now_dt
+
+
+def _get_cdc_procedure_query(
+    catalog: str,
+    schema: str,
+    procedure_name: str,
     time_cutoff_ms: int,
+    end_dt: datetime,
+) -> str:
+    if time_cutoff_ms == 0:
+        # First sync - use placeholder to signal full snapshot
+        return (
+            f"CALL {catalog}.{schema}.{procedure_name}('{FIRST_SYNC_START_TIME_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE}', '{end_dt.isoformat()}')",
+        )
+
+    cutoff_dt = ms_to_datetime(time_cutoff_ms)
+    return (
+        f"CALL {catalog}.{schema}.{procedure_name}('{cutoff_dt.isoformat()}', '{end_dt.isoformat()}')",
+    )
+
+
+def _get_cdc_table_query(
+    catalog: str,
+    schema: str,
+    table: str,
+    time_cutoff_ms: int,
+    end_dt: datetime,
 ) -> str:
     table_ref = f"{catalog}.{schema}.{table}"
 
     if time_cutoff_ms == 0:
         # First sync - table_changes has 30-day retention, so query the table directly
-        # Use DESCRIBE HISTORY to get exact timestamp of latest commit,
-        # avoiding race conditions where current_timestamp() > latest commit time
-        history_result = spark.sql(
-            f"SELECT timestamp FROM (DESCRIBE HISTORY {table_ref} LIMIT 1)"
-        ).first()
-        ts = history_result[0]
-        return f"SELECT 'INSERT' as _mp_change_type, * FROM {table_ref} TIMESTAMP AS OF '{ts.isoformat()}'"
+        return (
+            f"SELECT 'INSERT' as _mp_change_type, * FROM {table_ref} TIMESTAMP AS OF '{end_dt.isoformat()}'",
+        )
 
-    cutoff_dt, now_dt = _get_cdc_time_range(spark, time_cutoff_ms)
+    cutoff_dt = ms_to_datetime(time_cutoff_ms)
     return f"""
     SELECT CASE
         WHEN _change_type = 'update_postimage' THEN 'INSERT'
@@ -106,29 +123,41 @@ def _get_cdc_table_query(
         WHEN _change_type = 'insert' THEN 'INSERT'
         ELSE 'DELETE'
     END as _mp_change_type, *
-    FROM table_changes('{table_ref}', '{cutoff_dt.isoformat()}', '{now_dt.isoformat()}')
+    FROM table_changes('{table_ref}', '{cutoff_dt.isoformat()}', '{end_dt.isoformat()}')
     """
 
 
-def build_query(spark: SparkSession, args: argparse.Namespace) -> str:
+def build_query(spark: SparkSession, args: argparse.Namespace) -> tuple[str, int]:
+    """
+    Build the SQL query for the given sync type.
+    Returns a tuple of (query, change_capture_sync_last_commit_ms).
+    change_capture_sync_last_commit_ms is truthy for CDC sync types.
+    """
     table_ref = f"{args.catalog}.{args.schema_name}.{args.table}"
     procedure_name = f"get_{args.table}_cdc"
 
     if args.sync_type == "cdc":
+        if args.time_cutoff_ms == 0:
+            end_dt = _get_latest_commit_timestamp(
+                spark, args.catalog, args.schema_name, args.table
+            )
+        else:
+            end_dt = _get_latest_timestamp(spark)
         if check_procedure_exists(
             spark, args.catalog, args.schema_name, procedure_name
         ):
-            return _get_cdc_procedure_query(
-                spark,
+            query = _get_cdc_procedure_query(
                 args.catalog,
                 args.schema_name,
                 procedure_name,
                 args.time_cutoff_ms,
+                end_dt,
             )
         else:
-            return _get_cdc_table_query(
-                spark, args.catalog, args.schema_name, args.table, args.time_cutoff_ms
+            query = _get_cdc_table_query(
+                args.catalog, args.schema_name, args.table, args.time_cutoff_ms, end_dt
             )
+        return query, datetime_to_ms(end_dt)
     if args.sync_type == "time-based":
         filter_condition = generate_filter(args.non_nullable_columns)
         query = f"SELECT * FROM {table_ref} WHERE unix_timestamp({args.updated_time_column})*1000 >= {args.time_cutoff_ms}"
@@ -137,13 +166,13 @@ def build_query(spark: SparkSession, args: argparse.Namespace) -> str:
         if args.delay_ms > 0 and args.now_ms > 0:
             upper_bound_ms = args.now_ms - args.delay_ms
             query += f" AND unix_timestamp({args.updated_time_column})*1000 <= {upper_bound_ms}"
-        return query
+        return query, 0
     elif args.sync_type == "full":
         filter_condition = generate_filter(args.non_nullable_columns)
         query = f"SELECT * FROM {table_ref}"
         if filter_condition:
             query += f" WHERE {filter_condition}"
-        return query
+        return query, 0
     elif args.sync_type == "scd-latest":
         if not args.group_id_column or not args.scd_time_column:
             raise ValueError(
@@ -151,12 +180,15 @@ def build_query(spark: SparkSession, args: argparse.Namespace) -> str:
             )
         filter_condition = generate_filter(args.non_nullable_columns)
         where_clause = f" WHERE {filter_condition}" if filter_condition else ""
-        return f"""SELECT *
+        return (
+            f"""SELECT *
 FROM (
     SELECT *, ROW_NUMBER() OVER (PARTITION BY {args.group_id_column} ORDER BY {args.scd_time_column} DESC) AS row_num
     FROM {table_ref}{where_clause}
 ) RankedRows
-WHERE row_num = 1"""
+WHERE row_num = 1""",
+            0,
+        )
     else:
         raise ValueError(f"Unknown sync_type: {args.sync_type}")
 
@@ -381,6 +413,10 @@ if __name__ == "__main__":
         validate_row_count(
             spark, args.catalog, args.schema_name, args.table, args.validate_row_count
         )
-        query = build_query(spark, args)
+        query, change_capture_sync_last_commit_ms = build_query(spark, args)
         export_to_gcs_with_query(spark, query, args)
-        dbutils.notebook.exit(json.dumps({"query": query}))
+        result = {
+            "query": query,
+            "change_capture_sync_last_commit_ms": change_capture_sync_last_commit_ms,
+        }
+        dbutils.notebook.exit(json.dumps(result))
