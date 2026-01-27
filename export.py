@@ -1,9 +1,9 @@
 import argparse
 import json
 from datetime import datetime, timezone
-from typing import Optional
 
-from pyspark.sql import SparkSession, functions as F
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
 
 FIRST_SYNC_START_TIME_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE = "FIRST_SYNC"
 
@@ -18,7 +18,7 @@ def datetime_to_ms(dt: datetime) -> int:
     return int(dt.timestamp() * 1000)
 
 
-def generate_filter(non_nullable_columns: Optional[str]) -> str:
+def generate_filter(non_nullable_columns: str | None) -> str:
     """
     Generate a SQL condition to filter out rows where required columns are NULL or empty.
     """
@@ -53,9 +53,7 @@ def check_procedure_exists(
 ) -> bool:
     try:
         # DESCRIBE PROCEDURE returns rows if the procedure exists
-        result = spark.sql(
-            f"DESCRIBE PROCEDURE {catalog}.{schema}.{procedure_name}"
-        ).collect()
+        result = spark.sql(f"DESCRIBE PROCEDURE {catalog}.{schema}.{procedure_name}").collect()
         return len(result) > 0
     except Exception:
         # If DESCRIBE fails, the procedure doesn't exist
@@ -90,14 +88,10 @@ def _get_cdc_procedure_query(
 ) -> str:
     if time_cutoff_ms == 0:
         # First sync - use placeholder to signal full snapshot
-        return (
-            f"CALL {catalog}.{schema}.{procedure_name}('{FIRST_SYNC_START_TIME_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE}', '{end_dt.isoformat()}')",
-        )
+        return f"CALL {catalog}.{schema}.{procedure_name}('{FIRST_SYNC_START_TIME_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE}', '{end_dt.isoformat()}')"
 
     cutoff_dt = ms_to_datetime(time_cutoff_ms)
-    return (
-        f"CALL {catalog}.{schema}.{procedure_name}('{cutoff_dt.isoformat()}', '{end_dt.isoformat()}')",
-    )
+    return f"CALL {catalog}.{schema}.{procedure_name}('{cutoff_dt.isoformat()}', '{end_dt.isoformat()}')"
 
 
 def _get_cdc_table_query(
@@ -111,9 +105,7 @@ def _get_cdc_table_query(
 
     if time_cutoff_ms == 0:
         # First sync - table_changes has 30-day retention, so query the table directly
-        return (
-            f"SELECT 'INSERT' as _mp_change_type, * FROM {table_ref} TIMESTAMP AS OF '{end_dt.isoformat()}'",
-        )
+        return f"SELECT 'INSERT' as _mp_change_type, * FROM {table_ref} TIMESTAMP AS OF '{end_dt.isoformat()}'"
 
     cutoff_dt = ms_to_datetime(time_cutoff_ms)
     return f"""
@@ -138,14 +130,10 @@ def build_query(spark: SparkSession, args: argparse.Namespace) -> tuple[str, int
 
     if args.sync_type == "cdc":
         if args.time_cutoff_ms == 0:
-            end_dt = _get_latest_commit_timestamp(
-                spark, args.catalog, args.schema_name, args.table
-            )
+            end_dt = _get_latest_commit_timestamp(spark, args.catalog, args.schema_name, args.table)
         else:
             end_dt = _get_latest_timestamp(spark)
-        if check_procedure_exists(
-            spark, args.catalog, args.schema_name, procedure_name
-        ):
+        if check_procedure_exists(spark, args.catalog, args.schema_name, procedure_name):
             query = _get_cdc_procedure_query(
                 args.catalog,
                 args.schema_name,
@@ -175,9 +163,7 @@ def build_query(spark: SparkSession, args: argparse.Namespace) -> tuple[str, int
         return query, 0
     elif args.sync_type == "scd-latest":
         if not args.group_id_column or not args.scd_time_column:
-            raise ValueError(
-                "scd-latest sync requires --group_id_column and --scd_time_column"
-            )
+            raise ValueError("scd-latest sync requires --group_id_column and --scd_time_column")
         filter_condition = generate_filter(args.non_nullable_columns)
         where_clause = f" WHERE {filter_condition}" if filter_condition else ""
         return (
@@ -193,28 +179,20 @@ WHERE row_num = 1""",
         raise ValueError(f"Unknown sync_type: {args.sync_type}")
 
 
-def export_to_gcs_with_query(
-    spark: SparkSession, query: str, args: argparse.Namespace
-) -> None:
-    spark.conf.set(
-        "spark.databricks.delta.changeDataFeed.timestampOutOfRange.enabled", "true"
-    )
+def export_to_gcs_with_query(spark: SparkSession, query: str, args: argparse.Namespace) -> None:
+    spark.conf.set("spark.databricks.delta.changeDataFeed.timestampOutOfRange.enabled", "true")
     spark.conf.set("google.cloud.auth.service.account.enable", "true")
     spark.conf.set("fs.gs.project.id", args.gcp_project)
     spark.conf.set("fs.gs.auth.service.account.email", args.service_account_email)
     spark.conf.set("fs.gs.auth.service.account.private.key", args.service_account_key)
-    spark.conf.set(
-        "fs.gs.auth.service.account.private.key.id", args.service_account_key_id
-    )
+    spark.conf.set("fs.gs.auth.service.account.private.key.id", args.service_account_key_id)
 
     df = spark.sql(query)
     # Split the computed_hash_ignore_columns string into a list of column names
     ignore_columns = args.computed_hash_ignore_columns.split()
     if len(ignore_columns) > 0:
         filtered_cols = [c for c in df.columns if c not in ignore_columns]
-        filtered_cols = [
-            c for c in df.columns if c not in args.computed_hash_ignore_columns
-        ]
+        filtered_cols = [c for c in df.columns if c not in args.computed_hash_ignore_columns]
         filtered_cols.sort()
         # Create a struct containing all filtered columns
         struct_col = F.struct(*[F.col(c) for c in filtered_cols])
@@ -242,9 +220,7 @@ def export_to_gcs_with_query(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Spark to GCS unload using SparkPython"
-    )
+    parser = argparse.ArgumentParser(description="Spark to GCS unload using SparkPython")
     # Will remove these arguments soon
     parser.add_argument("_legacy_sql", help="results of sql query to unload", nargs="?")
     parser.add_argument(
@@ -254,9 +230,7 @@ if __name__ == "__main__":
         nargs="?",
         choices=["json", "csv"],
     )
-    parser.add_argument(
-        "_legacy_gcp_project", help="project in which gcs resources are", nargs="?"
-    )
+    parser.add_argument("_legacy_gcp_project", help="project in which gcs resources are", nargs="?")
     parser.add_argument("_legacy_bucket", help="gcs bucket to unload", nargs="?")
     parser.add_argument("_legacy_prefix", help="gcs path to unload", nargs="?")
     parser.add_argument(
@@ -307,12 +281,8 @@ if __name__ == "__main__":
         "--service_account_email",
         help="service account which has access to the gcs bucket and path",
     )
-    parser.add_argument(
-        "--service_account_key_id", help="key with which to authorize the gcs"
-    )
-    parser.add_argument(
-        "--service_account_key", help="key with which to authorize the gcs"
-    )
+    parser.add_argument("--service_account_key_id", help="key with which to authorize the gcs")
+    parser.add_argument("--service_account_key", help="key with which to authorize the gcs")
     parser.add_argument(
         "--computed_hash_column", help="column to emit for computed hash", default=""
     )
@@ -386,24 +356,14 @@ if __name__ == "__main__":
     args.gcp_project = args.gcp_project or args._legacy_gcp_project
     args.bucket = args.bucket or args._legacy_bucket
     args.prefix = args.prefix or args._legacy_prefix
-    args.service_account_email = (
-        args.service_account_email or args._legacy_service_account_email
-    )
-    args.service_account_key_id = (
-        args.service_account_key_id or args._legacy_service_account_key_id
-    )
-    args.service_account_key = (
-        args.service_account_key or args._legacy_service_account_key
-    )
-    args.computed_hash_column = (
-        args.computed_hash_column or args._legacy_computed_hash_column
-    )
+    args.service_account_email = args.service_account_email or args._legacy_service_account_email
+    args.service_account_key_id = args.service_account_key_id or args._legacy_service_account_key_id
+    args.service_account_key = args.service_account_key or args._legacy_service_account_key
+    args.computed_hash_column = args.computed_hash_column or args._legacy_computed_hash_column
     args.computed_hash_ignore_columns = (
         args.computed_hash_ignore_columns or args._legacy_computed_hash_ignore_columns
     )
-    args.max_records_per_file = (
-        args.max_records_per_file or args._legacy_max_records_per_file
-    )
+    args.max_records_per_file = args.max_records_per_file or args._legacy_max_records_per_file
 
     # V1 path (use SQL passed in as argument)
     if args._legacy_sql:

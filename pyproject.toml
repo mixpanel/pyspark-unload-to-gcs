@@ -1,0 +1,32 @@
+[project]
+name = "pyspark-unload-to-gcs"
+version = "0.1.0"
+description = "PySpark script to export data to Google Cloud Storage"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "UP",     # pyupgrade
+]
+ignore = ["E501", "F821"]  # line too long, undefined names (spark/dbutils injected by Databricks)
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ty.rules]
+unresolved-import = "ignore"  # pyspark not installed locally
+unresolved-reference = "ignore"  # spark/dbutils injected by Databricks
