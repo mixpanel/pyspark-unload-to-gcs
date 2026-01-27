@@ -26,3 +26,7 @@ ignore = ["E501", "F821"]  # line too long, undefined names (spark/dbutils injec
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.ty.rules]
+unresolved-import = "ignore"  # pyspark not installed locally
+unresolved-reference = "ignore"  # spark/dbutils injected by Databricks
