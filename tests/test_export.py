@@ -13,10 +13,21 @@ def test_ms_to_datetime():
     assert result == expected
 
 
-def test_datetime_to_ms():
-    dt = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+def test_datetime_to_ms_truncates_microseconds():
+    # 500 microseconds should be truncated (rounds down)
+    dt = datetime(2024, 1, 1, 0, 0, 0, 500, tzinfo=timezone.utc)
     result = datetime_to_ms(dt)
     assert result == 1704067200000
+
+    # 999 microseconds should also be truncated
+    dt = datetime(2024, 1, 1, 0, 0, 0, 999, tzinfo=timezone.utc)
+    result = datetime_to_ms(dt)
+    assert result == 1704067200000
+
+    # 1000 microseconds = 1 millisecond, should add 1ms
+    dt = datetime(2024, 1, 1, 0, 0, 0, 1000, tzinfo=timezone.utc)
+    result = datetime_to_ms(dt)
+    assert result == 1704067200001
 
 
 def test_generate_filter_empty():
@@ -161,14 +172,14 @@ class TestBuildQueryCdc:
 
     def test_cdc_incremental_sync_no_procedure(self):
         spark = MagicMock()
-        # Mock: procedure doesn't exist, return current timestamp
+        # Mock: procedure doesn't exist, return current timestamp with microseconds
         spark.sql.return_value.collect.return_value = []
         spark.sql.return_value.first.return_value = [
-            datetime(2024, 1, 2, 12, 0, 0, tzinfo=timezone.utc)
+            datetime(2024, 1, 2, 12, 0, 0, 123456, tzinfo=timezone.utc)
         ]
 
-        # 1704110400000 = 2024-01-01T12:00:00Z, +1ms = 2024-01-01T12:00:00.001Z
-        args = _make_args(sync_type="cdc", time_cutoff_ms=1704110400000)
+        # 1704110400123 = 2024-01-01T12:00:00.123Z, +1ms = 2024-01-01T12:00:00.124Z
+        args = _make_args(sync_type="cdc", time_cutoff_ms=1704110400123)
 
         query, ts = build_query(spark, args)
 
@@ -180,10 +191,11 @@ class TestBuildQueryCdc:
             "        WHEN _change_type = 'insert' THEN 'INSERT'\n"
             "        ELSE 'DELETE'\n"
             "    END as _mp_change_type, *\n"
-            "    FROM table_changes('test_catalog.test_schema.test_table', '2024-01-01T12:00:00.001000+00:00', '2024-01-02T12:00:00+00:00')\n"
+            "    FROM table_changes('test_catalog.test_schema.test_table', '2024-01-01T12:00:00.124000+00:00', '2024-01-02T12:00:00.123456+00:00')\n"
             "    "
         )
-        assert ts == datetime_to_ms(datetime(2024, 1, 2, 12, 0, 0, tzinfo=timezone.utc))
+        # Microseconds are truncated when converting to ms
+        assert ts == 1704196800123
 
     def test_cdc_with_procedure_first_sync(self):
         spark = MagicMock()
@@ -205,19 +217,20 @@ class TestBuildQueryCdc:
 
     def test_cdc_with_procedure_incremental(self):
         spark = MagicMock()
-        # Mock: procedure exists
+        # Mock: procedure exists, return timestamp with microseconds
         spark.sql.return_value.collect.return_value = [("some", "result")]
         spark.sql.return_value.first.return_value = [
-            datetime(2024, 1, 2, 12, 0, 0, tzinfo=timezone.utc)
+            datetime(2024, 1, 2, 12, 0, 0, 456789, tzinfo=timezone.utc)
         ]
 
-        # 1704110400000 = 2024-01-01T12:00:00Z, +1ms for cutoff
-        args = _make_args(sync_type="cdc", time_cutoff_ms=1704110400000)
+        # 1704110400456 = 2024-01-01T12:00:00.456Z, +1ms = 2024-01-01T12:00:00.457Z
+        args = _make_args(sync_type="cdc", time_cutoff_ms=1704110400456)
 
         query, ts = build_query(spark, args)
 
         assert query == (
             "CALL test_catalog.test_schema.get_test_table_cdc("
-            "'2024-01-01T12:00:00.001000+00:00', '2024-01-02T12:00:00+00:00')"
+            "'2024-01-01T12:00:00.457000+00:00', '2024-01-02T12:00:00.456789+00:00')"
         )
-        assert ts == datetime_to_ms(datetime(2024, 1, 2, 12, 0, 0, tzinfo=timezone.utc))
+        # Microseconds are truncated when converting to ms
+        assert ts == 1704196800456
