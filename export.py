@@ -125,6 +125,7 @@ def build_query(spark: SparkSession, args: argparse.Namespace) -> tuple[str, int
     Returns a tuple of (query, change_capture_sync_last_commit_ms).
     change_capture_sync_last_commit_ms is truthy for CDC sync types.
     """
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
     table_ref = f"{args.catalog}.{args.schema_name}.{args.table}"
     procedure_name = f"get_{args.table}_cdc"
 
