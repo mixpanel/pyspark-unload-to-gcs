@@ -76,7 +76,7 @@ def _get_latest_commit_timestamp(
 def _get_latest_timestamp(spark: SparkSession) -> datetime:
     now_result = spark.sql("SELECT current_timestamp()").first()
     now_dt = now_result[0]
-    return now_dt
+    return now_dt.replace(tzinfo=timezone.utc)
 
 
 def _get_cdc_procedure_query(
