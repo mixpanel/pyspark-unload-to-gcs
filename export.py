@@ -2,6 +2,7 @@ import argparse
 import json
 from datetime import datetime, timezone
 
+from pyspark import StorageLevel
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
@@ -213,10 +214,15 @@ def export_to_gcs_with_query(spark: SparkSession, query: str, args: argparse.Nam
             f"gs://{args.bucket}//{args.prefix}/"
         )
     else:
+        # Persist the DataFrame before writing to avoid race conditions
+        # between reading (especially from Delta tables with deletion vectors) and writing.
+        # MEMORY_AND_DISK allows spilling to disk for large datasets.
+        df = df.persist(StorageLevel.MEMORY_AND_DISK)
         writer = df.write.format(args.export_format)
         for key, value in write_options.items():
             writer = writer.option(key, value)
         writer.mode("overwrite").save(f"gs://{args.bucket}//{args.prefix}/")
+        df.unpersist()
 
 
 if __name__ == "__main__":
