@@ -214,8 +214,7 @@ def export_to_gcs_with_query(spark: SparkSession, query: str, args: argparse.Nam
             f"gs://{args.bucket}//{args.prefix}/"
         )
     else:
-        # Persist the DataFrame before writing to avoid race conditions
-        # between reading (especially from Delta tables with deletion vectors) and writing.
+        # Persist the DataFrame before writing to avoid race conditions between reading and writing.
         # MEMORY_AND_DISK allows spilling to disk for large datasets.
         df = df.persist(StorageLevel.MEMORY_AND_DISK)
         writer = df.write.format(args.export_format)
