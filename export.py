@@ -7,6 +7,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 FIRST_SYNC_START_TIME_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE = "FIRST_SYNC"
+HIVE_METASTORE = "hive_metastore"
 
 
 def ms_to_datetime(ms: int) -> datetime:
@@ -52,6 +53,9 @@ def validate_row_count(
 def check_procedure_exists(
     spark: SparkSession, catalog: str, schema: str, procedure_name: str
 ) -> bool:
+    # Databricks will fail the job if we attempt any procedure-related command in hive_metastore
+    if catalog == HIVE_METASTORE:
+        return False
     try:
         # DESCRIBE PROCEDURE returns rows if the procedure exists
         result = spark.sql(f"DESCRIBE PROCEDURE {catalog}.{schema}.{procedure_name}").collect()

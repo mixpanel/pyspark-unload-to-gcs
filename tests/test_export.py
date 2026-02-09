@@ -4,7 +4,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from export import build_query, datetime_to_ms, generate_filter, ms_to_datetime
+from export import (
+    HIVE_METASTORE,
+    build_query,
+    check_procedure_exists,
+    datetime_to_ms,
+    generate_filter,
+    ms_to_datetime,
+)
 
 
 def test_ms_to_datetime():
@@ -28,6 +35,13 @@ def test_datetime_to_ms_truncates_microseconds():
     dt = datetime(2024, 1, 1, 0, 0, 0, 1000, tzinfo=timezone.utc)
     result = datetime_to_ms(dt)
     assert result == 1704067200001
+
+
+def test_check_procedure_exists_returns_false_for_hive_metastore():
+    spark = MagicMock()
+    result = check_procedure_exists(spark, HIVE_METASTORE, "schema", "proc")
+    assert result is False
+    spark.sql.assert_not_called()
 
 
 def test_generate_filter_empty():
