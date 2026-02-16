@@ -186,6 +186,7 @@ WHERE row_num = 1""",
 
 def export_to_gcs_with_query(spark: SparkSession, query: str, args: argparse.Namespace) -> None:
     spark.conf.set("spark.databricks.delta.changeDataFeed.timestampOutOfRange.enabled", "true")
+    spark.conf.set("spark.sql.sources.commitProtocolClass", "com.databricks.io.CommitProtocol")
     spark.conf.set("google.cloud.auth.service.account.enable", "true")
     spark.conf.set("fs.gs.project.id", args.gcp_project)
     spark.conf.set("fs.gs.auth.service.account.email", args.service_account_email)
