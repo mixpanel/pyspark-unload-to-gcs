@@ -402,8 +402,11 @@ if __name__ == "__main__":
         )
         query, query_params, change_capture_sync_last_commit_ms = build_query(spark, args)
         export_to_gcs_with_query(spark, query, query_params, args)
+        resolved_query = query
+        for key, value in query_params.items():
+            resolved_query = resolved_query.replace(f":{key}", f"'{value}'")
         result = {
-            "query": query,
+            "query": resolved_query,
             "change_capture_sync_last_commit_ms": change_capture_sync_last_commit_ms,
         }
         dbutils.notebook.exit(json.dumps(result))
