@@ -1,13 +1,12 @@
 import argparse
+import builtins
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
 
 from export import (
-    HIVE_METASTORE,
     build_query,
-    check_procedure_exists,
     datetime_to_ms,
     generate_filter,
     ms_to_datetime,
@@ -35,13 +34,6 @@ def test_datetime_to_ms_truncates_microseconds():
     dt = datetime(2024, 1, 1, 0, 0, 0, 1000, tzinfo=timezone.utc)
     result = datetime_to_ms(dt)
     assert result == 1704067200001
-
-
-def test_check_procedure_exists_returns_false_for_hive_metastore():
-    spark = MagicMock()
-    result = check_procedure_exists(spark, HIVE_METASTORE, "schema", "proc")
-    assert result is False
-    spark.sql.assert_not_called()
 
 
 def test_generate_filter_empty():
@@ -74,6 +66,7 @@ def _make_args(**kwargs) -> argparse.Namespace:
         "now_ms": 0,
         "group_id_column": None,
         "scd_time_column": None,
+        "mixpanel_project": "12345678",
     }
     defaults.update(kwargs)
     return argparse.Namespace(**defaults)
@@ -84,22 +77,24 @@ class TestBuildQueryFull:
         spark = MagicMock()
         args = _make_args(sync_type="full")
 
-        query, ts = build_query(spark, args)
+        query, query_params, ts = build_query(spark, args)
 
         assert query == "SELECT * FROM test_catalog.test_schema.test_table"
+        assert query_params == {}
         assert ts == 0
 
     def test_full_sync_with_filter(self):
         spark = MagicMock()
         args = _make_args(sync_type="full", non_nullable_columns="user_id,email")
 
-        query, ts = build_query(spark, args)
+        query, query_params, ts = build_query(spark, args)
 
         assert query == (
             "SELECT * FROM test_catalog.test_schema.test_table "
             "WHERE user_id IS NOT NULL AND user_id != '' "
             "AND email IS NOT NULL AND email != ''"
         )
+        assert query_params == {}
         assert ts == 0
 
 
@@ -108,12 +103,13 @@ class TestBuildQueryTimeBased:
         spark = MagicMock()
         args = _make_args(sync_type="time-based", time_cutoff_ms=1000000)
 
-        query, ts = build_query(spark, args)
+        query, query_params, ts = build_query(spark, args)
 
         assert query == (
             "SELECT * FROM test_catalog.test_schema.test_table "
             "WHERE unix_timestamp(updated_at)*1000 >= 1000000"
         )
+        assert query_params == {}
         assert ts == 0
 
     def test_time_based_with_delay(self):
@@ -125,13 +121,14 @@ class TestBuildQueryTimeBased:
             now_ms=2000000,
         )
 
-        query, ts = build_query(spark, args)
+        query, query_params, ts = build_query(spark, args)
 
         assert query == (
             "SELECT * FROM test_catalog.test_schema.test_table "
             "WHERE unix_timestamp(updated_at)*1000 >= 1000000 "
             "AND unix_timestamp(updated_at)*1000 <= 1995000"
         )
+        assert query_params == {}
         assert ts == 0
 
 
@@ -144,7 +141,7 @@ class TestBuildQueryScdLatest:
             scd_time_column="updated_at",
         )
 
-        query, ts = build_query(spark, args)
+        query, query_params, ts = build_query(spark, args)
 
         assert query == (
             "SELECT *\n"
@@ -154,6 +151,7 @@ class TestBuildQueryScdLatest:
             ") RankedRows\n"
             "WHERE row_num = 1"
         )
+        assert query_params == {}
         assert ts == 0
 
     def test_scd_latest_missing_columns_raises(self):
@@ -165,29 +163,34 @@ class TestBuildQueryScdLatest:
 
 
 class TestBuildQueryCdc:
-    def test_cdc_first_sync_no_procedure(self):
+    def test_cdc_first_sync_no_custom_sql(self, monkeypatch):
         spark = MagicMock()
-        # Mock: procedure doesn't exist, return commit timestamp
-        spark.sql.return_value.collect.return_value = []
+        mock_dbutils = MagicMock()
+        mock_dbutils.fs.ls.side_effect = Exception("Path does not exist")
+        monkeypatch.setattr(builtins, "dbutils", mock_dbutils)
+
         spark.sql.return_value.first.return_value = [
             datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         ]
 
         args = _make_args(sync_type="cdc", time_cutoff_ms=0)
 
-        query, ts = build_query(spark, args)
+        query, query_params, ts = build_query(spark, args)
 
         assert query == (
             "SELECT 'INSERT' as _mp_change_type, * "
             "FROM test_catalog.test_schema.test_table "
             "TIMESTAMP AS OF '2024-01-01T12:00:00+00:00'"
         )
+        assert query_params == {}
         assert ts == datetime_to_ms(datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc))
 
-    def test_cdc_incremental_sync_no_procedure(self):
+    def test_cdc_incremental_sync_no_custom_sql(self, monkeypatch):
         spark = MagicMock()
-        # Mock: procedure doesn't exist, return current timestamp with microseconds
-        spark.sql.return_value.collect.return_value = []
+        mock_dbutils = MagicMock()
+        mock_dbutils.fs.ls.side_effect = Exception("Path does not exist")
+        monkeypatch.setattr(builtins, "dbutils", mock_dbutils)
+
         spark.sql.return_value.first.return_value = [
             datetime(2024, 1, 2, 12, 0, 0, 123456, tzinfo=timezone.utc)
         ]
@@ -195,7 +198,7 @@ class TestBuildQueryCdc:
         # 1704110400123 = 2024-01-01T12:00:00.123Z, +1ms = 2024-01-01T12:00:00.124Z
         args = _make_args(sync_type="cdc", time_cutoff_ms=1704110400123)
 
-        query, ts = build_query(spark, args)
+        query, query_params, ts = build_query(spark, args)
 
         assert query == (
             "\n"
@@ -208,31 +211,45 @@ class TestBuildQueryCdc:
             "    FROM table_changes('test_catalog.test_schema.test_table', '2024-01-01T12:00:00.124000+00:00', '2024-01-02T12:00:00.123456+00:00')\n"
             "    "
         )
+        assert query_params == {}
         # Microseconds are truncated when converting to ms
         assert ts == 1704196800123
 
-    def test_cdc_with_procedure_first_sync(self):
+    def test_cdc_with_custom_sql_first_sync(self, monkeypatch):
         spark = MagicMock()
-        # Mock: procedure exists
-        spark.sql.return_value.collect.return_value = [("some", "result")]
+        mock_dbutils = MagicMock()
+        mock_dbutils.fs.ls.return_value = [MagicMock()]  # File exists
+        mock_dbutils.fs.head.return_value = (
+            "SELECT * FROM my_custom_query WHERE ts <= :end_timestamp"
+        )
+        monkeypatch.setattr(builtins, "dbutils", mock_dbutils)
+
         spark.sql.return_value.first.return_value = [
             datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         ]
 
         args = _make_args(sync_type="cdc", time_cutoff_ms=0)
 
-        query, ts = build_query(spark, args)
+        query, query_params, ts = build_query(spark, args)
 
-        assert query == (
-            "CALL test_catalog.test_schema.get_test_table_cdc("
-            "'FIRST_SYNC', '2024-01-01T12:00:00+00:00')"
-        )
+        assert query == "SELECT * FROM my_custom_query WHERE ts <= :end_timestamp"
+        assert query_params == {
+            "end_timestamp": "2024-01-01T12:00:00+00:00",
+        }
         assert ts == datetime_to_ms(datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc))
+        mock_dbutils.fs.head.assert_called_once_with(
+            "dbfs:/external/mixpanel/12345678/queries/test_catalog__test_schema__test_table/initial_query.sql"
+        )
 
-    def test_cdc_with_procedure_incremental(self):
+    def test_cdc_with_custom_sql_incremental(self, monkeypatch):
         spark = MagicMock()
-        # Mock: procedure exists, return timestamp with microseconds
-        spark.sql.return_value.collect.return_value = [("some", "result")]
+        mock_dbutils = MagicMock()
+        mock_dbutils.fs.ls.return_value = [MagicMock()]  # File exists
+        mock_dbutils.fs.head.return_value = (
+            "SELECT * FROM my_custom_query WHERE ts > :start_timestamp AND ts <= :end_timestamp"
+        )
+        monkeypatch.setattr(builtins, "dbutils", mock_dbutils)
+
         spark.sql.return_value.first.return_value = [
             datetime(2024, 1, 2, 12, 0, 0, 456789, tzinfo=timezone.utc)
         ]
@@ -240,11 +257,18 @@ class TestBuildQueryCdc:
         # 1704110400456 = 2024-01-01T12:00:00.456Z, +1ms = 2024-01-01T12:00:00.457Z
         args = _make_args(sync_type="cdc", time_cutoff_ms=1704110400456)
 
-        query, ts = build_query(spark, args)
+        query, query_params, ts = build_query(spark, args)
 
-        assert query == (
-            "CALL test_catalog.test_schema.get_test_table_cdc("
-            "'2024-01-01T12:00:00.457000+00:00', '2024-01-02T12:00:00.456789+00:00')"
+        assert (
+            query
+            == "SELECT * FROM my_custom_query WHERE ts > :start_timestamp AND ts <= :end_timestamp"
         )
+        assert query_params == {
+            "start_timestamp": "2024-01-01T12:00:00.457000+00:00",
+            "end_timestamp": "2024-01-02T12:00:00.456789+00:00",
+        }
         # Microseconds are truncated when converting to ms
         assert ts == 1704196800456
+        mock_dbutils.fs.head.assert_called_once_with(
+            "dbfs:/external/mixpanel/12345678/queries/test_catalog__test_schema__test_table/recurring_query.sql"
+        )

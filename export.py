@@ -1,12 +1,10 @@
 import argparse
 import json
+import re
 from datetime import datetime, timezone
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-
-FIRST_SYNC_START_TIME_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE = "FIRST_SYNC"
-HIVE_METASTORE = "hive_metastore"
 
 
 def ms_to_datetime(ms: int) -> datetime:
@@ -49,21 +47,6 @@ def validate_row_count(
         raise Exception(f"Row count {row_count} exceeds limit {limit}")
 
 
-def check_procedure_exists(
-    spark: SparkSession, catalog: str, schema: str, procedure_name: str
-) -> bool:
-    # Databricks will fail the job if we attempt any procedure-related command in hive_metastore
-    if catalog == HIVE_METASTORE:
-        return False
-    try:
-        # DESCRIBE PROCEDURE returns rows if the procedure exists
-        result = spark.sql(f"DESCRIBE PROCEDURE {catalog}.{schema}.{procedure_name}").collect()
-        return len(result) > 0
-    except Exception:
-        # If DESCRIBE fails, the procedure doesn't exist
-        return False
-
-
 def _get_latest_commit_timestamp(
     spark: SparkSession,
     catalog: str,
@@ -83,19 +66,51 @@ def _get_latest_timestamp(spark: SparkSession) -> datetime:
     return now_dt
 
 
-def _get_cdc_procedure_query(
+def _extract_project_id(bucket: str) -> str | None:
+    """
+    TODO: pass in the actual project id
+    Extract project ID from bucket name (e.g., 'mixpanel-3855718-d06b8cbdffe4ef68' -> '3855718').
+    """
+    match = re.search(r"mixpanel-(\d+)-", bucket)
+    return match.group(1) if match else None
+
+
+def __check_custom_sql_exists(catalog: str, schema: str, table: str, mixpanel_project: str) -> bool:
+    path = f"dbfs:/external/mixpanel/{mixpanel_project}/queries/{catalog}__{schema}__{table}/recurring_query.sql"
+    try:
+        dbutils.fs.ls(path)
+        return True
+    except Exception:
+        return False
+
+
+def _get_custom_sql_query(
     catalog: str,
     schema: str,
-    procedure_name: str,
+    table: str,
+    mixpanel_project: str,
     time_cutoff_ms: int,
     end_dt: datetime,
-) -> str:
+) -> tuple[str, dict]:
+    base_path = f"/external/mixpanel/{mixpanel_project}/queries/{catalog}__{schema}__{table}"
+
     if time_cutoff_ms == 0:
-        # First sync - use placeholder to signal full snapshot
-        return f"CALL {catalog}.{schema}.{procedure_name}('{FIRST_SYNC_START_TIME_TIMESTAMP_PLACEHOLDER_FOR_CDC_PROCEDURE}', '{end_dt.isoformat()}')"
+        query_path = f"{base_path}/initial_query.sql"
+    else:
+        query_path = f"{base_path}/recurring_query.sql"
+
+    query = dbutils.fs.head(f"dbfs:{query_path}")
+
     # Add 1ms to exclude entries already processed (Databricks timestamps are at millisecond precision)
-    cutoff_dt = ms_to_datetime(time_cutoff_ms + 1)
-    return f"CALL {catalog}.{schema}.{procedure_name}('{cutoff_dt.isoformat()}', '{end_dt.isoformat()}')"
+    cutoff_dt = ms_to_datetime(time_cutoff_ms + 1) if time_cutoff_ms > 0 else None
+
+    query_params = {
+        "end_timestamp": end_dt.isoformat(),
+    }
+    if cutoff_dt:
+        query_params["start_timestamp"] = cutoff_dt.isoformat()
+
+    return query, query_params
 
 
 def _get_cdc_table_query(
@@ -123,25 +138,28 @@ def _get_cdc_table_query(
     """
 
 
-def build_query(spark: SparkSession, args: argparse.Namespace) -> tuple[str, int]:
+def build_query(spark: SparkSession, args: argparse.Namespace) -> tuple[str, dict, int]:
     """
     Build the SQL query for the given sync type.
     Returns a tuple of (query, change_capture_sync_last_commit_ms).
     change_capture_sync_last_commit_ms is truthy for CDC sync types.
     """
     table_ref = f"{args.catalog}.{args.schema_name}.{args.table}"
-    procedure_name = f"get_{args.table}_cdc"
 
     if args.sync_type == "cdc":
+        query_params = {}
         if args.time_cutoff_ms == 0:
             end_dt = _get_latest_commit_timestamp(spark, args.catalog, args.schema_name, args.table)
         else:
             end_dt = _get_latest_timestamp(spark)
-        if check_procedure_exists(spark, args.catalog, args.schema_name, procedure_name):
-            query = _get_cdc_procedure_query(
+        if __check_custom_sql_exists(
+            args.catalog, args.schema_name, args.table, args.mixpanel_project
+        ):
+            query, query_params = _get_custom_sql_query(
                 args.catalog,
                 args.schema_name,
-                procedure_name,
+                args.table,
+                args.mixpanel_project,
                 args.time_cutoff_ms,
                 end_dt,
             )
@@ -149,7 +167,7 @@ def build_query(spark: SparkSession, args: argparse.Namespace) -> tuple[str, int
             query = _get_cdc_table_query(
                 args.catalog, args.schema_name, args.table, args.time_cutoff_ms, end_dt
             )
-        return query, datetime_to_ms(end_dt)
+        return query, query_params, datetime_to_ms(end_dt)
     if args.sync_type == "time-based":
         filter_condition = generate_filter(args.non_nullable_columns)
         query = f"SELECT * FROM {table_ref} WHERE unix_timestamp({args.updated_time_column})*1000 >= {args.time_cutoff_ms}"
@@ -158,13 +176,13 @@ def build_query(spark: SparkSession, args: argparse.Namespace) -> tuple[str, int
         if args.delay_ms > 0 and args.now_ms > 0:
             upper_bound_ms = args.now_ms - args.delay_ms
             query += f" AND unix_timestamp({args.updated_time_column})*1000 <= {upper_bound_ms}"
-        return query, 0
+        return query, {}, 0
     elif args.sync_type == "full":
         filter_condition = generate_filter(args.non_nullable_columns)
         query = f"SELECT * FROM {table_ref}"
         if filter_condition:
             query += f" WHERE {filter_condition}"
-        return query, 0
+        return query, {}, 0
     elif args.sync_type == "scd-latest":
         if not args.group_id_column or not args.scd_time_column:
             raise ValueError("scd-latest sync requires --group_id_column and --scd_time_column")
@@ -177,13 +195,16 @@ FROM (
     FROM {table_ref}{where_clause}
 ) RankedRows
 WHERE row_num = 1""",
+            {},
             0,
         )
     else:
         raise ValueError(f"Unknown sync_type: {args.sync_type}")
 
 
-def export_to_gcs_with_query(spark: SparkSession, query: str, args: argparse.Namespace) -> None:
+def export_to_gcs_with_query(
+    spark: SparkSession, query: str, query_params: dict, args: argparse.Namespace
+) -> None:
     spark.conf.set("spark.databricks.delta.changeDataFeed.timestampOutOfRange.enabled", "true")
     spark.conf.set("google.cloud.auth.service.account.enable", "true")
     spark.conf.set("fs.gs.project.id", args.gcp_project)
@@ -191,7 +212,7 @@ def export_to_gcs_with_query(spark: SparkSession, query: str, args: argparse.Nam
     spark.conf.set("fs.gs.auth.service.account.private.key", args.service_account_key)
     spark.conf.set("fs.gs.auth.service.account.private.key.id", args.service_account_key_id)
 
-    df = spark.sql(query)
+    df = spark.sql(query, args=query_params)
     # Split the computed_hash_ignore_columns string into a list of column names
     ignore_columns = args.computed_hash_ignore_columns.split()
     if len(ignore_columns) > 0:
@@ -354,6 +375,8 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    # TODO: make more resilient
+    args.mixpanel_project = _extract_project_id(args.bucket)
 
     # Fallback to legacy positional args if named args not provided (V1 compatibility)
     args.export_format = args.export_format or args._legacy_export_format
@@ -371,16 +394,19 @@ if __name__ == "__main__":
 
     # V1 path (use SQL passed in as argument)
     if args._legacy_sql:
-        export_to_gcs_with_query(spark, args._legacy_sql, args)
+        export_to_gcs_with_query(spark, args._legacy_sql, {}, args)
     else:
         # V2 path (construct SQL query in Python code)
         validate_row_count(
             spark, args.catalog, args.schema_name, args.table, args.validate_row_count
         )
-        query, change_capture_sync_last_commit_ms = build_query(spark, args)
-        export_to_gcs_with_query(spark, query, args)
+        query, query_params, change_capture_sync_last_commit_ms = build_query(spark, args)
+        export_to_gcs_with_query(spark, query, query_params, args)
+        resolved_query = query
+        for key, value in query_params.items():
+            resolved_query = resolved_query.replace(f":{key}", f"'{value}'")
         result = {
-            "query": query,
+            "query": resolved_query,
             "change_capture_sync_last_commit_ms": change_capture_sync_last_commit_ms,
         }
         dbutils.notebook.exit(json.dumps(result))
