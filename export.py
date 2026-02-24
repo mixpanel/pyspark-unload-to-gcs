@@ -246,53 +246,6 @@ def export_to_gcs_with_query(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Spark to GCS unload using SparkPython")
-    # Will remove these arguments soon
-    parser.add_argument("_legacy_sql", help="results of sql query to unload", nargs="?")
-    parser.add_argument(
-        "_legacy_export_format",
-        help="format to export the data. Supports json and csv",
-        default="json",
-        nargs="?",
-        choices=["json", "csv"],
-    )
-    parser.add_argument("_legacy_gcp_project", help="project in which gcs resources are", nargs="?")
-    parser.add_argument("_legacy_bucket", help="gcs bucket to unload", nargs="?")
-    parser.add_argument("_legacy_prefix", help="gcs path to unload", nargs="?")
-    parser.add_argument(
-        "_legacy_service_account_email",
-        help="service account which has access to the gcs bucket and path",
-        nargs="?",
-    )
-    parser.add_argument(
-        "_legacy_service_account_key_id",
-        help="key with which to authorize the gcs",
-        nargs="?",
-    )
-    parser.add_argument(
-        "_legacy_service_account_key",
-        help="key with which to authorize the gcs",
-        nargs="?",
-    )
-    parser.add_argument(
-        "_legacy_computed_hash_column",
-        help="column to emit for computed hash",
-        default="",
-        nargs="?",
-    )
-    parser.add_argument(
-        "_legacy_computed_hash_ignore_columns",
-        help="ignore the passed columns from hash computation",
-        default="",
-        nargs="?",
-    )
-    parser.add_argument(
-        "_legacy_max_records_per_file",
-        type=int,
-        nargs="?",
-        default=None,
-        help="maximum number of records per output file to limit compressed .gz file size (optional)",
-    )
-    # Positional arguments translated to named arguments
     parser.add_argument(
         "--export_format",
         help="format to export the data. Supports json and csv",
@@ -323,7 +276,6 @@ if __name__ == "__main__":
         default=None,
         help="maximum number of records per output file to limit compressed .gz file size",
     )
-    # New arguments for v2 export
     parser.add_argument(
         "--sync_type",
         type=str,
@@ -378,35 +330,14 @@ if __name__ == "__main__":
     # TODO: make more resilient
     args.mixpanel_project = _extract_project_id(args.bucket)
 
-    # Fallback to legacy positional args if named args not provided (V1 compatibility)
-    args.export_format = args.export_format or args._legacy_export_format
-    args.gcp_project = args.gcp_project or args._legacy_gcp_project
-    args.bucket = args.bucket or args._legacy_bucket
-    args.prefix = args.prefix or args._legacy_prefix
-    args.service_account_email = args.service_account_email or args._legacy_service_account_email
-    args.service_account_key_id = args.service_account_key_id or args._legacy_service_account_key_id
-    args.service_account_key = args.service_account_key or args._legacy_service_account_key
-    args.computed_hash_column = args.computed_hash_column or args._legacy_computed_hash_column
-    args.computed_hash_ignore_columns = (
-        args.computed_hash_ignore_columns or args._legacy_computed_hash_ignore_columns
-    )
-    args.max_records_per_file = args.max_records_per_file or args._legacy_max_records_per_file
-
-    # V1 path (use SQL passed in as argument)
-    if args._legacy_sql:
-        export_to_gcs_with_query(spark, args._legacy_sql, {}, args)
-    else:
-        # V2 path (construct SQL query in Python code)
-        validate_row_count(
-            spark, args.catalog, args.schema_name, args.table, args.validate_row_count
-        )
-        query, query_params, change_capture_sync_last_commit_ms = build_query(spark, args)
-        export_to_gcs_with_query(spark, query, query_params, args)
-        resolved_query = query
-        for key, value in query_params.items():
-            resolved_query = resolved_query.replace(f":{key}", f"'{value}'")
-        result = {
-            "query": resolved_query,
-            "change_capture_sync_last_commit_ms": change_capture_sync_last_commit_ms,
-        }
-        dbutils.notebook.exit(json.dumps(result))
+    validate_row_count(spark, args.catalog, args.schema_name, args.table, args.validate_row_count)
+    query, query_params, change_capture_sync_last_commit_ms = build_query(spark, args)
+    export_to_gcs_with_query(spark, query, query_params, args)
+    resolved_query = query
+    for key, value in query_params.items():
+        resolved_query = resolved_query.replace(f":{key}", f"'{value}'")
+    result = {
+        "query": resolved_query,
+        "change_capture_sync_last_commit_ms": change_capture_sync_last_commit_ms,
+    }
+    dbutils.notebook.exit(json.dumps(result))
