@@ -1,6 +1,5 @@
 import argparse
 import json
-import re
 from datetime import datetime, timezone
 
 from pyspark.sql import SparkSession
@@ -56,32 +55,16 @@ def _get_latest_commit_timestamp(
     history_result = spark.sql(
         f"SELECT timestamp FROM (DESCRIBE HISTORY {catalog}.{schema}.{table} LIMIT 1)"
     ).first()
-    last_commit_dt = history_result[0]
+    # PySpark always returns native datetime
+    last_commit_dt = history_result[0].replace(tzinfo=timezone.utc)
     return last_commit_dt
 
 
 def _get_latest_timestamp(spark: SparkSession) -> datetime:
     now_result = spark.sql("SELECT current_timestamp()").first()
-    now_dt = now_result[0]
+    # PySpark always returns native datetime
+    now_dt = now_result[0].replace(tzinfo=timezone.utc)
     return now_dt
-
-
-def _extract_project_id(bucket: str) -> str | None:
-    """
-    TODO: pass in the actual project id
-    Extract project ID from bucket name (e.g., 'mixpanel-3855718-d06b8cbdffe4ef68' -> '3855718').
-    """
-    match = re.search(r"mixpanel-(\d+)-", bucket)
-    return match.group(1) if match else None
-
-
-def __check_custom_sql_exists(catalog: str, schema: str, table: str, mixpanel_project: str) -> bool:
-    path = f"dbfs:/external/mixpanel/{mixpanel_project}/queries/{catalog}__{schema}__{table}/recurring_query.sql"
-    try:
-        dbutils.fs.ls(path)
-        return True
-    except Exception:
-        return False
 
 
 def _get_custom_sql_query(
@@ -92,14 +75,18 @@ def _get_custom_sql_query(
     time_cutoff_ms: int,
     end_dt: datetime,
 ) -> tuple[str, dict]:
-    base_path = f"/external/mixpanel/{mixpanel_project}/queries/{catalog}__{schema}__{table}"
+    base_path = (
+        f"/Workspace/External/mixpanel/{mixpanel_project}/queries/{catalog}/{schema}/{table}"
+    )
+    filename = "initial_query.sql" if time_cutoff_ms == 0 else "recurring_query.sql"
+    query_path = f"{base_path}/{filename}"
 
-    if time_cutoff_ms == 0:
-        query_path = f"{base_path}/initial_query.sql"
-    else:
-        query_path = f"{base_path}/recurring_query.sql"
+    try:
+        dbutils.fs.ls(f"file:{query_path}")
+    except Exception:
+        raise FileNotFoundError(f"Custom SQL query file not found: {query_path}")
 
-    query = dbutils.fs.head(f"dbfs:{query_path}")
+    query = dbutils.fs.head(f"file:{query_path}")
 
     # Add 1ms to exclude entries already processed (Databricks timestamps are at millisecond precision)
     cutoff_dt = ms_to_datetime(time_cutoff_ms + 1) if time_cutoff_ms > 0 else None
@@ -152,14 +139,12 @@ def build_query(spark: SparkSession, args: argparse.Namespace) -> tuple[str, dic
             end_dt = _get_latest_commit_timestamp(spark, args.catalog, args.schema_name, args.table)
         else:
             end_dt = _get_latest_timestamp(spark)
-        if __check_custom_sql_exists(
-            args.catalog, args.schema_name, args.table, args.mixpanel_project
-        ):
+        if args.use_custom_sql:
             query, query_params = _get_custom_sql_query(
                 args.catalog,
                 args.schema_name,
                 args.table,
-                args.mixpanel_project,
+                args.mixpanel_project_id,
                 args.time_cutoff_ms,
                 end_dt,
             )
@@ -325,10 +310,16 @@ if __name__ == "__main__":
         type=str,
         help="Column to order by (descending) for SCD latest sync (required for scd-latest)",
     )
+    parser.add_argument(
+        "--use_custom_sql",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--mixpanel_project_id",
+        type=str,
+    )
 
     args = parser.parse_args()
-    # TODO: make more resilient
-    args.mixpanel_project = _extract_project_id(args.bucket)
 
     validate_row_count(spark, args.catalog, args.schema_name, args.table, args.validate_row_count)
     query, query_params, change_capture_sync_last_commit_ms = build_query(spark, args)

@@ -66,7 +66,8 @@ def _make_args(**kwargs) -> argparse.Namespace:
         "now_ms": 0,
         "group_id_column": None,
         "scd_time_column": None,
-        "mixpanel_project": "12345678",
+        "use_custom_sql": False,
+        "mixpanel_project_id": "12345678",
     }
     defaults.update(kwargs)
     return argparse.Namespace(**defaults)
@@ -163,12 +164,8 @@ class TestBuildQueryScdLatest:
 
 
 class TestBuildQueryCdc:
-    def test_cdc_first_sync_no_custom_sql(self, monkeypatch):
+    def test_cdc_first_sync_no_custom_sql(self):
         spark = MagicMock()
-        mock_dbutils = MagicMock()
-        mock_dbutils.fs.ls.side_effect = Exception("Path does not exist")
-        monkeypatch.setattr(builtins, "dbutils", mock_dbutils)
-
         spark.sql.return_value.first.return_value = [
             datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         ]
@@ -185,12 +182,8 @@ class TestBuildQueryCdc:
         assert query_params == {}
         assert ts == datetime_to_ms(datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc))
 
-    def test_cdc_incremental_sync_no_custom_sql(self, monkeypatch):
+    def test_cdc_incremental_sync_no_custom_sql(self):
         spark = MagicMock()
-        mock_dbutils = MagicMock()
-        mock_dbutils.fs.ls.side_effect = Exception("Path does not exist")
-        monkeypatch.setattr(builtins, "dbutils", mock_dbutils)
-
         spark.sql.return_value.first.return_value = [
             datetime(2024, 1, 2, 12, 0, 0, 123456, tzinfo=timezone.utc)
         ]
@@ -218,7 +211,7 @@ class TestBuildQueryCdc:
     def test_cdc_with_custom_sql_first_sync(self, monkeypatch):
         spark = MagicMock()
         mock_dbutils = MagicMock()
-        mock_dbutils.fs.ls.return_value = [MagicMock()]  # File exists
+        mock_dbutils.fs.ls.return_value = [MagicMock()]  # Both files exist
         mock_dbutils.fs.head.return_value = (
             "SELECT * FROM my_custom_query WHERE ts <= :end_timestamp"
         )
@@ -228,7 +221,7 @@ class TestBuildQueryCdc:
             datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         ]
 
-        args = _make_args(sync_type="cdc", time_cutoff_ms=0)
+        args = _make_args(sync_type="cdc", time_cutoff_ms=0, use_custom_sql=True)
 
         query, query_params, ts = build_query(spark, args)
 
@@ -238,13 +231,13 @@ class TestBuildQueryCdc:
         }
         assert ts == datetime_to_ms(datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc))
         mock_dbutils.fs.head.assert_called_once_with(
-            "dbfs:/external/mixpanel/12345678/queries/test_catalog__test_schema__test_table/initial_query.sql"
+            "file:/Workspace/External/mixpanel/12345678/queries/test_catalog/test_schema/test_table/initial_query.sql"
         )
 
     def test_cdc_with_custom_sql_incremental(self, monkeypatch):
         spark = MagicMock()
         mock_dbutils = MagicMock()
-        mock_dbutils.fs.ls.return_value = [MagicMock()]  # File exists
+        mock_dbutils.fs.ls.return_value = [MagicMock()]  # Both files exist
         mock_dbutils.fs.head.return_value = (
             "SELECT * FROM my_custom_query WHERE ts > :start_timestamp AND ts <= :end_timestamp"
         )
@@ -255,7 +248,7 @@ class TestBuildQueryCdc:
         ]
 
         # 1704110400456 = 2024-01-01T12:00:00.456Z, +1ms = 2024-01-01T12:00:00.457Z
-        args = _make_args(sync_type="cdc", time_cutoff_ms=1704110400456)
+        args = _make_args(sync_type="cdc", time_cutoff_ms=1704110400456, use_custom_sql=True)
 
         query, query_params, ts = build_query(spark, args)
 
@@ -270,5 +263,20 @@ class TestBuildQueryCdc:
         # Microseconds are truncated when converting to ms
         assert ts == 1704196800456
         mock_dbutils.fs.head.assert_called_once_with(
-            "dbfs:/external/mixpanel/12345678/queries/test_catalog__test_schema__test_table/recurring_query.sql"
+            "file:/Workspace/External/mixpanel/12345678/queries/test_catalog/test_schema/test_table/recurring_query.sql"
         )
+
+    def test_cdc_custom_sql_file_not_found_raises(self, monkeypatch):
+        spark = MagicMock()
+        mock_dbutils = MagicMock()
+        mock_dbutils.fs.ls.side_effect = Exception("Path does not exist")
+        monkeypatch.setattr(builtins, "dbutils", mock_dbutils)
+
+        spark.sql.return_value.first.return_value = [
+            datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        ]
+
+        args = _make_args(sync_type="cdc", time_cutoff_ms=0, use_custom_sql=True)
+
+        with pytest.raises(FileNotFoundError, match="initial_query.sql"):
+            build_query(spark, args)
