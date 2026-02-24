@@ -326,7 +326,7 @@ if __name__ == "__main__":
         help="Column to order by (descending) for SCD latest sync (required for scd-latest)",
     )
 
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
     # TODO: make more resilient
     args.mixpanel_project = _extract_project_id(args.bucket)
 
