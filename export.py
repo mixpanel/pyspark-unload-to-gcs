@@ -191,11 +191,13 @@ def export_to_gcs_with_query(
     spark: SparkSession, query: str, query_params: dict, args: argparse.Namespace
 ) -> None:
     spark.conf.set("spark.databricks.delta.changeDataFeed.timestampOutOfRange.enabled", "true")
-    spark.conf.set("google.cloud.auth.service.account.enable", "true")
-    spark.conf.set("fs.gs.project.id", args.gcp_project)
-    spark.conf.set("fs.gs.auth.service.account.email", args.service_account_email)
-    spark.conf.set("fs.gs.auth.service.account.private.key", args.service_account_key)
-    spark.conf.set("fs.gs.auth.service.account.private.key.id", args.service_account_key_id)
+    spark.conf.set("spark.hadoop.google.cloud.auth.service.account.enable", "true")
+    spark.conf.set("spark.hadoop.fs.gs.project.id", args.gcp_project)
+    spark.conf.set("spark.hadoop.fs.gs.auth.service.account.email", args.service_account_email)
+    spark.conf.set("spark.hadoop.fs.gs.auth.service.account.private.key", args.service_account_key)
+    spark.conf.set(
+        "spark.hadoop.fs.gs.auth.service.account.private.key.id", args.service_account_key_id
+    )
 
     df = spark.sql(query, args=query_params)
     # Split the computed_hash_ignore_columns string into a list of column names
