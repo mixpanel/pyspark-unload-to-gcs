@@ -114,6 +114,7 @@ def _get_cdc_table_query(
         return f"SELECT 'INSERT' as _mp_change_type, * FROM {table_ref} TIMESTAMP AS OF '{end_dt.isoformat()}'"
     # Add 1ms to exclude entries already processed (Databricks timestamps are at millisecond precision)
     cutoff_dt = ms_to_datetime(time_cutoff_ms + 1)
+    print(f"cdc_table_changes start timestamp: ${cutoff_dt.isoformat()}, end timestamp: ${end_dt.isoformat()}")
     return f"""
     SELECT CASE
         WHEN _change_type = 'update_postimage' THEN 'INSERT'
