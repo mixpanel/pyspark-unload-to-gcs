@@ -9,4 +9,4 @@ sys.modules["pyspark.sql"] = MagicMock()
 sys.modules["pyspark.sql.functions"] = MagicMock()
 
 mock_dbutils = MagicMock()
-builtins.dbutils = mock_dbutils  # type: ignore[attr-defined]
+setattr(builtins, "dbutils", mock_dbutils)
