@@ -31,7 +31,7 @@ def generate_filter(non_nullable_columns: str | None) -> str:
 def validate_row_count(
     spark: SparkSession, catalog: str, schema: str, table: str, limit: int
 ) -> None:
-    if limit == None or limit <= 0:
+    if limit is None or limit <= 0:
         return
 
     try:
