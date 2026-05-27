@@ -276,6 +276,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--validate_row_count",
         type=int,
+        default=0,
         help="Fail if row count exceeds this limit (0=no limit)",
     )
     parser.add_argument(
