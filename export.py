@@ -205,7 +205,6 @@ def export_to_gcs_with_query(
     ignore_columns = args.computed_hash_ignore_columns.split()
     if len(ignore_columns) > 0:
         filtered_cols = [c for c in df.columns if c not in ignore_columns]
-        filtered_cols = [c for c in df.columns if c not in args.computed_hash_ignore_columns]
         filtered_cols.sort()
         # Create a struct containing all filtered columns
         struct_col = F.struct(*[F.col(c) for c in filtered_cols])
