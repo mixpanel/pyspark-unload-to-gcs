@@ -175,7 +175,16 @@ def build_query(spark: SparkSession, args: argparse.Namespace) -> tuple[str, dic
         if not args.group_id_column or not args.scd_time_column:
             raise ValueError("scd-latest sync requires --group_id_column and --scd_time_column")
         filter_condition = generate_filter(args.non_nullable_columns)
-        where_clause = f" WHERE {filter_condition}" if filter_condition else ""
+        where_parts = [filter_condition] if filter_condition else []
+        if args.time_cutoff_ms > 0:
+            cutoff_dt = args.time_cutoff_ms + 1
+            end_dt = _get_latest_timestamp(spark)
+            where_parts.append(
+                f"{args.group_id_column} IN ("
+                f" SELECT DISTINCT {args.group_id_column} "
+                f" FROM table_changes('{table_ref}', '{cutoff_dt.isoformat()}', '{end_dt.isoformat()}'))"
+            )
+        where_clause = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
         return (
             f"""SELECT *
 FROM (
