@@ -177,7 +177,7 @@ def build_query(spark: SparkSession, args: argparse.Namespace) -> tuple[str, dic
         filter_condition = generate_filter(args.non_nullable_columns)
         where_parts = [filter_condition] if filter_condition else []
         if args.time_cutoff_ms > 0:
-            cutoff_dt = args.time_cutoff_ms + 1
+            cutoff_dt = ms_to_datetime(args.time_cutoff_ms + 1)
             end_dt = _get_latest_timestamp(spark)
             where_parts.append(
                 f"{args.group_id_column} IN ("
