@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.types import NullType
 
 
 def ms_to_datetime(ms: int) -> datetime:
@@ -197,7 +198,20 @@ WHERE row_num = 1""",
         )
     else:
         raise ValueError(f"Unknown sync_type: {args.sync_type}")
+        
+def validate_dataframe(df) -> None:
+    void_columns = [
+        field.name
+        for field in df.schema.fields
+        if isinstance(field.dataType, NullType)
+    ]
 
+    if void_columns:
+        raise ValueError(
+            "DataFrame contains untyped NULL/void columns: "
+            + ", ".join(void_columns)
+            + ". Cast these columns to an explicit type before exporting."
+        )
 
 def export_to_gcs_with_query(
     spark: SparkSession, query: str, query_params: dict, args: argparse.Namespace
@@ -210,6 +224,7 @@ def export_to_gcs_with_query(
     spark.conf.set("fs.gs.auth.service.account.private.key.id", args.service_account_key_id)
 
     df = spark.sql(query, args=query_params)
+    validate_dataframe(df)
     # Split the computed_hash_ignore_columns string into a list of column names
     ignore_columns = args.computed_hash_ignore_columns.split()
     if len(ignore_columns) > 0:
