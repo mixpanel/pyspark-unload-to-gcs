@@ -4,12 +4,20 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
+from export import validate_dataframe
 
 from export import (
     build_query,
     datetime_to_ms,
     generate_filter,
     ms_to_datetime,
+)
+
+from pyspark.sql.types import (
+    NullType,
+    StringType,
+    StructField,
+    StructType,
 )
 
 
@@ -280,3 +288,28 @@ class TestBuildQueryCdc:
 
         with pytest.raises(FileNotFoundError, match="initial_query.sql"):
             build_query(spark, args)
+
+    def test_validate_dataframe_rejects_void_column():
+        df = MagicMock()
+        df.schema = StructType(
+            [
+                StructField("valid_column", StringType(), True),
+                StructField("null_column", NullType(), True),
+            ]
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="DataFrame contains void columns: null_column",
+        ):
+        validate_dataframe(df)
+
+
+    def test_validate_dataframe_accepts_typed_columns():
+        df = MagicMock()
+        df.schema = StructType(
+            [
+                StructField("name", StringType(), True),
+            ]
+        )
+        validate_dataframe(df)
