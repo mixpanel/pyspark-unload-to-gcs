@@ -215,7 +215,6 @@ def replace_void_columns_with_typed_nulls(df: DataFrame) -> DataFrame:
     if not void_columns:
         return df
 
-    print(f"Replacing void columns with typed NULL literals: {sorted(void_columns)}")
     projected_columns = [
         (
             F.lit(None).cast("string").alias(name)
