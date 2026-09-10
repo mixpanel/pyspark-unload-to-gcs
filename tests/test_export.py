@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import export
 from export import (
     build_query,
     datetime_to_ms,
@@ -280,3 +281,50 @@ class TestBuildQueryCdc:
 
         with pytest.raises(FileNotFoundError, match="initial_query.sql"):
             build_query(spark, args)
+
+
+class TestReplaceVoidColumnsWithTypedNulls:
+    def test_no_void_columns_returns_dataframe_unchanged(self, monkeypatch):
+        monkeypatch.setattr(export, "F", MagicMock())
+        df = MagicMock()
+        df.dtypes = [("user_id", "string"), ("count", "bigint")]
+
+        result = export.replace_void_columns_with_typed_nulls(df)
+
+        assert result is df
+        df.select.assert_not_called()
+
+    def test_void_column_replaced_with_typed_null_literal(self, monkeypatch):
+        mock_functions = MagicMock()
+        monkeypatch.setattr(export, "F", mock_functions)
+        df = MagicMock()
+        df.dtypes = [
+            ("$app_version", "string"),
+            ("media_sdk_partner_app_name", "void"),
+        ]
+        df.columns = ["$app_version", "media_sdk_partner_app_name"]
+
+        result = export.replace_void_columns_with_typed_nulls(df)
+
+        mock_functions.col.assert_called_once_with("`$app_version`")
+        mock_functions.lit.assert_called_once_with(None)
+        mock_functions.lit.return_value.cast.assert_called_once_with("string")
+        mock_functions.lit.return_value.cast.return_value.alias.assert_called_once_with(
+            "media_sdk_partner_app_name"
+        )
+        df.select.assert_called_once_with(
+            mock_functions.col.return_value,
+            mock_functions.lit.return_value.cast.return_value.alias.return_value,
+        )
+        assert result is df.select.return_value
+
+    def test_backticks_in_column_name_are_escaped(self, monkeypatch):
+        mock_functions = MagicMock()
+        monkeypatch.setattr(export, "F", mock_functions)
+        df = MagicMock()
+        df.dtypes = [("odd`name", "string"), ("void_col", "void")]
+        df.columns = ["odd`name", "void_col"]
+
+        export.replace_void_columns_with_typed_nulls(df)
+
+        mock_functions.col.assert_called_once_with("`odd``name`")

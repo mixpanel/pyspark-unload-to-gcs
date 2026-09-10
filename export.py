@@ -2,8 +2,10 @@ import argparse
 import json
 from datetime import datetime, timezone
 
-from pyspark.sql import SparkSession
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
+
+VOID_TYPE_NAME = "void"
 
 
 def ms_to_datetime(ms: int) -> datetime:
@@ -199,6 +201,32 @@ WHERE row_num = 1""",
         raise ValueError(f"Unknown sync_type: {args.sync_type}")
 
 
+def replace_void_columns_with_typed_nulls(df: DataFrame) -> DataFrame:
+    """
+    Replace VOID-typed columns with a typed NULL literal so they are never read from the table scan.
+
+    Delta tables can carry VOID columns (for example from a CTAS with an uncast `NULL AS col`).
+    Databricks runtimes before 18.2 cannot materialize them: the scan drops the column from its
+    output while the write projection still references it, which fails at execution time with
+    `[INTERNAL_ERROR] Couldn't find <col>#<id> in [...]`. A VOID column can only ever hold NULL,
+    so a string-typed NULL literal yields the same exported data.
+    """
+    void_columns = {name for name, type_name in df.dtypes if type_name == VOID_TYPE_NAME}
+    if not void_columns:
+        return df
+
+    print(f"Replacing void columns with typed NULL literals: {sorted(void_columns)}")
+    projected_columns = [
+        (
+            F.lit(None).cast("string").alias(name)
+            if name in void_columns
+            else F.col("`" + name.replace("`", "``") + "`")
+        )
+        for name in df.columns
+    ]
+    return df.select(*projected_columns)
+
+
 def export_to_gcs_with_query(
     spark: SparkSession, query: str, query_params: dict, args: argparse.Namespace
 ) -> None:
@@ -209,7 +237,7 @@ def export_to_gcs_with_query(
     spark.conf.set("fs.gs.auth.service.account.private.key", args.service_account_key)
     spark.conf.set("fs.gs.auth.service.account.private.key.id", args.service_account_key_id)
 
-    df = spark.sql(query, args=query_params)
+    df = replace_void_columns_with_typed_nulls(spark.sql(query, args=query_params))
     # Split the computed_hash_ignore_columns string into a list of column names
     ignore_columns = args.computed_hash_ignore_columns.split()
     if len(ignore_columns) > 0:
