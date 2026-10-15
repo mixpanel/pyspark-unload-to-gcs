@@ -56,6 +56,7 @@ def test_generate_filter_multiple_columns():
 def _make_args(**kwargs) -> argparse.Namespace:
     """Helper to create args namespace with defaults."""
     defaults = {
+        "query": "",
         "catalog": "test_catalog",
         "schema_name": "test_schema",
         "table": "test_table",

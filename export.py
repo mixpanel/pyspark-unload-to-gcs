@@ -31,13 +31,14 @@ def generate_filter(non_nullable_columns: str | None) -> str:
 
 
 def validate_row_count(
-    spark: SparkSession, catalog: str, schema: str, table: str, limit: int
+    spark: SparkSession, catalog: str, schema: str, table: str, limit: int, query: str = ""
 ) -> None:
     if limit <= 0:
         return
 
     try:
-        result = spark.sql(f"SELECT count(*) FROM {catalog}.{schema}.{table}").first()
+        source = f"({query}\n) AS raw_query" if query else f"{catalog}.{schema}.{table}"
+        result = spark.sql(f"SELECT count(*) FROM {source}").first()
         if result is None or result[0] is None:
             raise Exception("Row count unavailable: query returned no result")
         row_count = int(result[0])
@@ -136,6 +137,14 @@ def build_query(spark: SparkSession, args: argparse.Namespace) -> tuple[str, dic
     Returns a tuple of (query, change_capture_sync_last_commit_ms).
     change_capture_sync_last_commit_ms is truthy for CDC sync types.
     """
+    if args.query:
+        if args.sync_type != "full" or args.use_custom_sql:
+            raise ValueError("--query requires --sync_type full and cannot use --use_custom_sql")
+        query = args.query.strip().rstrip(";").rstrip()
+        if not query:
+            raise ValueError("--query must contain a SQL query")
+        return f"SELECT * FROM ({query}\n) AS raw_query", {}, 0
+
     table_ref = f"{args.catalog}.{args.schema_name}.{args.table}"
 
     if args.sync_type == "cdc":
@@ -309,6 +318,11 @@ if __name__ == "__main__":
     parser.add_argument("--schema_name", type=str, help="Databricks schema name")
     parser.add_argument("--table", type=str, help="Databricks table name")
     parser.add_argument(
+        "--query",
+        default="",
+        help="SQL to export verbatim for full syncs; overrides the table and filters",
+    )
+    parser.add_argument(
         "--validate_row_count",
         type=int,
         default=0,
@@ -360,8 +374,15 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    validate_row_count(spark, args.catalog, args.schema_name, args.table, args.validate_row_count)
     query, query_params, change_capture_sync_last_commit_ms = build_query(spark, args)
+    validate_row_count(
+        spark,
+        args.catalog,
+        args.schema_name,
+        args.table,
+        args.validate_row_count,
+        query=query if args.query else "",
+    )
     export_to_gcs_with_query(spark, query, query_params, args)
     resolved_query = query
     for key, value in query_params.items():
